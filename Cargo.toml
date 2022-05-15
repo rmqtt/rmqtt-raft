@@ -4,7 +4,7 @@ version = "0.1.0"
 authors = ["rmqtt-rs <rmqttd@126.com>"]
 edition = "2018"
 license = "MIT/Apache-2.0"
-repository = "https://https://github.com/rmqtt-rs/rmqtt-raft"
+repository = "https://github.com/rmqtt-rs/rmqtt-raft"
 description = "rmqtt-raft - A raft framework, for regular people"
 keywords = ["raft", "distributed-systems"]
 
