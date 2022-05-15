@@ -2,3 +2,5 @@
 /target
 /.git
 /.idea
+/examples/rmqttraft-warp-memstore/target
+/examples/rmqttraft-warp-memstore/Cargo.lock
