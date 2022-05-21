@@ -1,10 +1,5 @@
-use crate::error::{Error, Result};
-use crate::message::{Message, RaftResponse, Status};
-use crate::raft_node::{Peer, RaftNode};
-use crate::raft_server::RaftServer;
-use crate::raft_service::raft_service_client::RaftServiceClient;
-use crate::raft_service::Proposal;
-use crate::raft_service::{ConfChange as RiteraftConfChange, Empty, ResultCode};
+use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use bincode::{deserialize, serialize};
@@ -15,8 +10,14 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::time::timeout;
 use tonic::Request;
 
-use std::sync::Arc;
-use std::time::Duration;
+use crate::error::{Error, Result};
+use crate::message::{Message, RaftResponse, Status};
+use crate::raft_node::{Peer, RaftNode};
+use crate::raft_server::RaftServer;
+use crate::raft_service::{ConfChange as RiteraftConfChange, Empty, ResultCode};
+use crate::raft_service::Proposal;
+use crate::raft_service::raft_service_client::RaftServiceClient;
+
 type DashMap<K, V> = dashmap::DashMap<K, V, ahash::RandomState>;
 
 pub type RaftGrpcClient = RaftServiceClient<tonic::transport::channel::Channel>;
@@ -115,9 +116,9 @@ impl Mailbox {
             Ok(_) => match timeout(Duration::from_secs(15), rx).await {
                 Ok(Ok(RaftResponse::Response { data })) => Ok(data),
                 Ok(Ok(RaftResponse::WrongLeader {
-                    leader_id,
-                    leader_addr,
-                })) => {
+                          leader_id,
+                          leader_addr,
+                      })) => {
                     debug!(
                         "this node not is Leader, leader_id: {:?}, leader_addr: {:?}",
                         leader_id, leader_addr

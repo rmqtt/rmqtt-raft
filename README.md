@@ -1,17 +1,15 @@
-# RmqttRaft - A raft framework, for regular people 
+# RmqttRaft - A raft framework, for regular people
 
 This is an attempt to create a layer on top of
-[tikv/raft-rs](https://github.com/tikv/raft-rs), that is easier to use and
-implement. This is not supposed to be the most featureful raft, but instead a
-convenient interface to get started quickly, and have a working raft in no
-time.
+[tikv/raft-rs](https://github.com/tikv/raft-rs), that is easier to use and implement. This is not supposed to be the
+most featureful raft, but instead a convenient interface to get started quickly, and have a working raft in no time.
 
 The interface is strongly inspired by the one used by [canonical/raft](https://github.com/canonical/raft).
 
 ## Getting started
 
-In order to "raft" storage, we need to implement the `Storage` trait for it.
-Bellow is an example with `HashStore`, which is a thread-safe wrapper around an
+In order to "raft" storage, we need to implement the `Storage` trait for it. Bellow is an example with `HashStore`,
+which is a thread-safe wrapper around an
 `HashMap`:
 
 ```rust
@@ -79,10 +77,11 @@ impl Store for HashStore {
 
 ```
 
-Only 4 methods need to be implemented for the Store: 
-- `Store::apply`: applies a commited entry to the store.  
+Only 4 methods need to be implemented for the Store:
+
+- `Store::apply`: applies a commited entry to the store.
 - `Store::query`  query a entry from the store;
-- `Store::snapshot`: returns snapshot data for the store. 
+- `Store::snapshot`: returns snapshot data for the store.
 - `Store::restore`: applies the snapshot passed as argument.
 
 ### running the raft
@@ -118,10 +117,10 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 
 The `mailbox` gives you a way to interact with the raft, for sending a message, or leaving the cluster for example.
 
-
 ## Credit
 
-This work is based on  [riteraft](https://github.com/ritelabs/riteraft), but more adjustments and improvements have been made to the code .
+This work is based on  [riteraft](https://github.com/ritelabs/riteraft), but more adjustments and improvements have been
+made to the code .
 
 ## License
 

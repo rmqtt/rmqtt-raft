@@ -5,19 +5,18 @@ extern crate slog_term;
 
 use async_trait::async_trait;
 use bincode::{deserialize, serialize};
-use slog::info;
 use rmqtt_raft::{Mailbox, Raft, Result as RaftResult, Store};
 use serde::{Deserialize, Serialize};
 use slog::Drain;
-use std::convert::From;
-use structopt::StructOpt;
-use warp::{reply, Filter};
-
+use slog::info;
 use std::collections::HashMap;
+use std::convert::From;
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::str::FromStr;
 use std::sync::{Arc, RwLock};
+use structopt::StructOpt;
+use warp::{Filter, reply};
 
 #[derive(Debug, StructOpt)]
 struct Options {
@@ -94,11 +93,11 @@ impl Store for HashStore {
 
 fn with_mailbox(
     mailbox: Arc<Mailbox>,
-) -> impl Filter<Extract = (Arc<Mailbox>,), Error = Infallible> + Clone {
+) -> impl Filter<Extract=(Arc<Mailbox>, ), Error=Infallible> + Clone {
     warp::any().map(move || mailbox.clone())
 }
 
-fn with_store(store: HashStore) -> impl Filter<Extract = (HashStore,), Error = Infallible> + Clone {
+fn with_store(store: HashStore) -> impl Filter<Extract=(HashStore, ), Error=Infallible> + Clone {
     warp::any().map(move || store.clone())
 }
 

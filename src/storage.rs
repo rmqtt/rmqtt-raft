@@ -1,6 +1,7 @@
-use crate::error::Result;
 use raft::prelude::*;
 use raft::storage::MemStorage as CoreMemStorage;
+
+use crate::error::Result;
 
 pub trait LogStore: Storage {
     fn append(&mut self, entries: &[Entry]) -> Result<()>;

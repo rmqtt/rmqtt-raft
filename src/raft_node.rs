@@ -1,25 +1,25 @@
-use std::collections::vec_deque::VecDeque;
 use std::collections::HashMap;
+use std::collections::vec_deque::VecDeque;
 use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use crate::error::{Error, Result};
-use crate::message::{Message, RaftResponse, Status};
-use crate::raft::Store;
-use crate::raft_service::raft_service_client::RaftServiceClient;
-use crate::raft_service::{Message as RiteraftMessage, Query};
-use crate::storage::{LogStore, MemStorage};
-
 use bincode::{deserialize, serialize};
 use log::*;
+use raft::{Config, prelude::*, raw_node::RawNode};
 use raft::eraftpb::{ConfChange, ConfChangeType, Entry, EntryType, Message as RaftMessage};
-use raft::{prelude::*, raw_node::RawNode, Config};
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::time::timeout;
-use tonic::transport::{Channel, Endpoint};
 use tonic::Request;
+use tonic::transport::{Channel, Endpoint};
+
+use crate::error::{Error, Result};
+use crate::message::{Message, RaftResponse, Status};
+use crate::raft::Store;
+use crate::raft_service::{Message as RiteraftMessage, Query};
+use crate::raft_service::raft_service_client::RaftServiceClient;
+use crate::storage::{LogStore, MemStorage};
 
 pub type RaftGrpcClient = RaftServiceClient<tonic::transport::channel::Channel>;
 
