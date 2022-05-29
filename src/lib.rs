@@ -8,4 +8,3 @@ mod raft_node;
 mod raft_server;
 mod raft_service;
 mod storage;
-

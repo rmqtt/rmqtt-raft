@@ -6,14 +6,14 @@ use log::{error, info, warn};
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::time::timeout;
-use tonic::{Request, Response, Status};
 use tonic::transport::Server;
+use tonic::{Request, Response, Status};
 
 use crate::message::{Message, RaftResponse};
+use crate::raft_service::raft_service_server::{RaftService, RaftServiceServer};
 use crate::raft_service::{
     self, ConfChange as RiteraftConfChange, Empty, Message as RiteraftMessage,
 };
-use crate::raft_service::raft_service_server::{RaftService, RaftServiceServer};
 
 pub struct RaftServer {
     snd: mpsc::Sender<Message>,
