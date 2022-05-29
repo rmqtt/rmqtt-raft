@@ -14,9 +14,9 @@ use crate::error::{Error, Result};
 use crate::message::{Message, RaftResponse, Status};
 use crate::raft_node::{Peer, RaftNode};
 use crate::raft_server::RaftServer;
-use crate::raft_service::{ConfChange as RiteraftConfChange, Empty, ResultCode};
-use crate::raft_service::Proposal;
 use crate::raft_service::raft_service_client::RaftServiceClient;
+use crate::raft_service::Proposal;
+use crate::raft_service::{ConfChange as RiteraftConfChange, Empty, ResultCode};
 
 type DashMap<K, V> = dashmap::DashMap<K, V, ahash::RandomState>;
 
@@ -79,11 +79,12 @@ pub struct Mailbox {
 
 impl Mailbox {
     async fn peer(&self, leader_id: u64, leader_addr: String) -> Result<RaftGrpcClient> {
-        self.peers
+        let peer = self
+            .peers
             .entry((leader_id, leader_addr.clone()))
-            .or_insert(Peer::new(leader_addr)?)
-            .client()
-            .await
+            .or_insert_with(|| Peer::new(leader_addr))
+            .clone();
+        peer.client().await
     }
 
     async fn send_to_leader(
@@ -116,9 +117,9 @@ impl Mailbox {
             Ok(_) => match timeout(Duration::from_secs(15), rx).await {
                 Ok(Ok(RaftResponse::Response { data })) => Ok(data),
                 Ok(Ok(RaftResponse::WrongLeader {
-                          leader_id,
-                          leader_addr,
-                      })) => {
+                    leader_id,
+                    leader_addr,
+                })) => {
                     debug!(
                         "this node not is Leader, leader_id: {:?}, leader_addr: {:?}",
                         leader_id, leader_addr
@@ -155,51 +156,6 @@ impl Mailbox {
             }
         }
     }
-    //
-    // pub async fn send_to_this_node(&self, message: Vec<u8>) -> Result<Vec<u8>> {
-    //     info!("send message len: {:?}", message.len());
-    //     let (tx, rx) = oneshot::channel();
-    //     let proposal = Message::Propose {
-    //         proposal: message,
-    //         chan: tx,
-    //     };
-    //     let sender = self.sender.clone();
-    //     // TODO make timeout duration a variable
-    //     match sender.send(proposal).await {
-    //         Ok(_) => match timeout(Duration::from_secs(5), rx).await {
-    //             Ok(Ok(RaftResponse::Response { data })) => {
-    //                 info!("recv raft response: {:?}", data);
-    //                 Ok(data)
-    //             }
-    //             Ok(Ok(RaftResponse::WrongLeader {
-    //                 leader_id,
-    //                 leader_addr,
-    //             })) => {
-    //                 warn!(
-    //                     "recv WrongLeader leader_id: {:?}, leader_addr: {:?}",
-    //                     leader_id, leader_addr
-    //                 );
-    //                 Err(Error::Unknown)
-    //             }
-    //             Ok(Ok(resp)) => {
-    //                 warn!("recv other raft response: {:?}", resp);
-    //                 Err(Error::Unknown)
-    //             }
-    //             Ok(Err(e)) => {
-    //                 error!("recv error, {:?}", e);
-    //                 Err(Error::Unknown)
-    //             }
-    //             Err(e) => {
-    //                 error!("timeout, {:?}", e);
-    //                 Err(Error::Unknown)
-    //             }
-    //         },
-    //         Err(e) => {
-    //             error!("send error, {:?}", e.to_string());
-    //             Err(Error::Unknown)
-    //         }
-    //     }
-    // }
 
     pub async fn query(&self, query: Vec<u8>) -> Result<Vec<u8>> {
         let (tx, rx) = oneshot::channel();
@@ -370,8 +326,8 @@ impl<S: Store + Send + Sync + 'static> Raft<S> {
         let addr = self.addr.clone();
         let mut node =
             RaftNode::new_follower(self.rx, self.tx.clone(), node_id, self.store, &self.logger)?;
-        node.add_peer(&leader_addr, leader_id).await?;
-        let mut client = node.peer_mut(leader_id).unwrap().client().await?;
+        let peer = node.add_peer(&leader_addr, leader_id);
+        let mut client = peer.client().await?;
         let server = RaftServer::new(self.tx, addr);
         let _server_handle = tokio::spawn(server.run());
         // let node_handle = tokio::spawn(node.run());
@@ -418,7 +374,7 @@ impl<S: Store + Send + Sync + 'static> Raft<S> {
             info!("change_config response.peer_addrs: {:?}", peer_addrs);
             for (id, addr) in peer_addrs {
                 if id != assigned_id {
-                    node.add_peer(&addr, id).await?;
+                    node.add_peer(&addr, id);
                 }
             }
         } else {
