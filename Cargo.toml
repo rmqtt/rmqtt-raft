@@ -24,6 +24,7 @@ prost = "0.7"
 protobuf = { version = "2.14.0", features = ["with-bytes", "with-serde"] }
 dashmap = "4.0.2"
 ahash = "0.7.6"
+chrono = "0.4.19"
 
 [build-dependencies]
 tonic-build = "0.4"
