@@ -22,6 +22,10 @@ pub enum Error {
     LeaderNotExist,
     #[error("protobuf error: `{0}`")]
     ProtobufError(#[from] protobuf::ProtobufError),
+    #[error("timeout")]
+    Elapsed,
+    #[error("{0}")]
+    Msg(String),
 }
 
 impl Error {
