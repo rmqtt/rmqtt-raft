@@ -1,80 +1,57 @@
-use parking_lot::RwLock;
-use std::collections::vec_deque::VecDeque;
 use std::collections::HashMap;
+use std::collections::vec_deque::VecDeque;
 use std::ops::{Deref, DerefMut};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, AtomicI64, Ordering};
 use std::time::{Duration, Instant};
 
 use bincode::{deserialize, serialize};
 use log::*;
+use parking_lot::RwLock;
+use raft::{Config, prelude::*, raw_node::RawNode};
 use raft::eraftpb::{ConfChange, ConfChangeType, Entry, EntryType, Message as RaftMessage};
-use raft::{prelude::*, raw_node::RawNode, Config};
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::time::timeout;
-use tonic::transport::{Channel, Endpoint};
 use tonic::Request;
+use tonic::transport::{Channel, Endpoint};
 
 use crate::error::{Error, Result};
-use crate::message::{Message, RaftResponse, Status};
+use crate::message::{Merger, Message, Proposals, RaftResponse, ReplyChan, Status};
 use crate::raft::Store;
-use crate::raft_service::raft_service_client::RaftServiceClient;
 use crate::raft_service::{Message as RiteraftMessage, Query};
+use crate::raft_service::raft_service_client::RaftServiceClient;
 use crate::storage::{LogStore, MemStorage};
 
 pub type RaftGrpcClient = RaftServiceClient<tonic::transport::channel::Channel>;
 
 struct MessageSender {
     message: RaftMessage,
-    client: RaftGrpcClient,
+    client: Peer,
     client_id: u64,
     chan: mpsc::Sender<Message>,
-    max_retries: usize,
-    timeout: Duration,
 }
 
 impl MessageSender {
-    /// attempt to send a message MessageSender::max_retries times at MessageSender::timeout
-    /// inteval.
-    async fn send(mut self) {
-        let mut current_retry = 0usize;
-
-        let message = protobuf::Message::write_to_bytes(&self.message).unwrap();
-        let msg = RiteraftMessage { inner: message };
-        loop {
-            let message_request = Request::new(msg.clone());
-            match self.client.send_message(message_request).await {
-                Ok(_) => {
-                    return;
-                }
-                Err(e) => {
+    async fn send(self) {
+        match self.client.send_message(&self.message).await {
+            Ok(_) => {}
+            Err(e) => {
+                error!(
+                    "error sending message after {:?}",
+                    e
+                );
+                if let Err(e) = self
+                    .chan
+                    .send(Message::ReportUnreachable {
+                        node_id: self.client_id,
+                    })
+                    .await
+                {
                     error!(
-                        "error sending message after {} retries: {}",
-                        self.max_retries, e
+                        "error sending message after {}",
+                        e
                     );
-                    if current_retry < self.max_retries {
-                        current_retry += 1;
-                        tokio::time::sleep(self.timeout).await;
-                    } else {
-                        error!(
-                            "error sending message after {} retries: {}",
-                            self.max_retries, e
-                        );
-                        if let Err(e) = self
-                            .chan
-                            .send(Message::ReportUnreachable {
-                                node_id: self.client_id,
-                            })
-                            .await
-                        {
-                            error!(
-                                "error sending message after {} retries: {}",
-                                self.max_retries, e
-                            );
-                        }
-                        return;
-                    }
                 }
             }
         }
@@ -134,7 +111,9 @@ impl QuerySender {
 #[derive(Clone)]
 pub struct Peer {
     addr: String,
-    client: Arc<RwLock<Option<RaftServiceClient<Channel>>>>,
+    client: Arc<RwLock<Option<RaftGrpcClient>>>,
+    grpc_fails: Arc<AtomicU64>,
+    grpc_fail_time: Arc<AtomicI64>,
 }
 
 impl Peer {
@@ -143,6 +122,8 @@ impl Peer {
         Peer {
             addr,
             client: Arc::new(RwLock::new(None)),
+            grpc_fails: Arc::new(AtomicU64::new(0)),
+            grpc_fail_time: Arc::new(AtomicI64::new(0))
         }
     }
 
@@ -161,7 +142,7 @@ impl Peer {
     }
 
     #[inline]
-    async fn _connect(endpoint: &Endpoint) -> Result<RaftServiceClient<Channel>> {
+    async fn _connect(endpoint: &Endpoint) -> Result<RaftGrpcClient> {
         let channel = tokio::time::timeout(Duration::from_secs(8), endpoint.connect())
             .await
             .map_err(|e| Error::Other(Box::new(e)))?
@@ -171,7 +152,7 @@ impl Peer {
     }
 
     #[inline]
-    async fn connect(&self) -> Result<RaftServiceClient<Channel>> {
+    async fn connect(&self) -> Result<RaftGrpcClient> {
         if let Some(c) = self.client.read().as_ref() {
             return Ok(c.clone());
         }
@@ -182,14 +163,78 @@ impl Peer {
     }
 
     #[inline]
-    pub async fn client(&self) -> Result<RaftServiceClient<Channel>> {
+    pub async fn client(&self) -> Result<RaftGrpcClient> {
         self.connect().await
     }
+
+    #[inline]
+    pub async fn send_message(&self, msg: &RaftMessage) -> Result<Vec<u8>> {
+        if !self.available(){
+            return Err(Error::Msg("gRPC unavailable".into()))
+        }
+
+        let msg = RiteraftMessage { inner: protobuf::Message::write_to_bytes(msg)? };
+        match self._send_message(msg).await{
+            Ok(reply) => {
+                self.record_success();
+                Ok(reply)
+            },
+            Err(e) => {
+                self.record_failure();
+                Err(e)
+            }
+        }
+    }
+
+    #[inline]
+    async fn _send_message(&self, msg: RiteraftMessage) -> Result<Vec<u8>> {
+        let c = self.connect().await?;
+
+        async fn task(mut c: RaftGrpcClient, msg: RiteraftMessage) -> Result<Vec<u8>> {
+            let message_request = Request::new(msg);
+            let response = c.send_message(message_request).await?;
+            let message_reply = response.into_inner();
+            Ok(message_reply.inner)
+        }
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(3),  //@TODO configurable
+            task(c, msg),
+        ).await;
+        let result = result.map_err(|_| Error::Elapsed)??;
+        Ok(result)
+    }
+
 
     #[inline]
     pub fn _addr(&self) -> &str {
         &self.addr
     }
+
+
+    #[inline]
+    pub fn record_failure(&self) {
+        self.grpc_fails.fetch_add(1, Ordering::SeqCst);
+        self.grpc_fail_time
+            .store(chrono::Local::now().timestamp_millis(), Ordering::SeqCst);
+    }
+
+
+    #[inline]
+    pub fn record_success(&self) {
+        self.grpc_fails.store(0, Ordering::SeqCst);
+    }
+
+
+    #[inline]
+    pub fn available(&self) -> bool {
+        self.grpc_fails.load(Ordering::SeqCst) < 4  //@TODO configurable
+            || (chrono::Local::now().timestamp_millis()
+            - self.grpc_fail_time.load(Ordering::SeqCst))
+            > 3000 //@TODO configurable
+    }
+
+
 }
 
 pub struct RaftNode<S: Store> {
@@ -319,7 +364,7 @@ impl<S: Store + 'static> RaftNode<S> {
                             .entry(msg.client_id)
                             .or_insert((Arc::new(AtomicBool::new(false)), VecDeque::new()));
                         q.push_back(msg);
-                        if q.len() > 300{  //@TODO configurable
+                        if q.len() > 300 {  //@TODO configurable
                             warn!("There is too much backlog of unsent messages, {}", q.len())
                         }
                         sends(&mut queues);
@@ -349,14 +394,6 @@ impl<S: Store + 'static> RaftNode<S> {
             ..Default::default()
         }
     }
-
-    // #[inline]
-    // pub fn peer_mut(&mut self, id: u64) -> Option<&mut Peer> {
-    //     match self.peers.get_mut(&id) {
-    //         None => None,
-    //         Some(v) => v.as_mut(),
-    //     }
-    // }
 
     #[inline]
     pub fn peer(&self, id: u64) -> Option<Peer> {
@@ -455,7 +492,7 @@ impl<S: Store + 'static> RaftNode<S> {
             client: leader_client,
             chan,
             timeout: Duration::from_millis(1000),
-            max_retries: 3,
+            max_retries: 0,
         };
         tokio::spawn(query_sender.send());
     }
@@ -485,14 +522,27 @@ impl<S: Store + 'static> RaftNode<S> {
         }
     }
 
+    #[inline]
+    fn take_and_propose(&mut self, merger: &mut Merger, client_send: &mut HashMap<u64, ReplyChan>) {
+        if let Some((data, reply_chans)) = merger.take() {
+            let seq = self.seq.fetch_add(1, Ordering::Relaxed);
+            client_send.insert(seq, reply_chans);
+            let seq = serialize(&seq).unwrap();
+            let data = serialize(&data).unwrap();
+            self.propose(seq, data).unwrap();
+        }
+    }
+
     pub async fn run(mut self) -> Result<()> {
         let mut heartbeat = Duration::from_millis(100);
         let mut now = Instant::now();
         // A map to contain sender to client responses
         let mut client_send = HashMap::new();
         let mut snapshot_received = self.is_leader();
+        let mut merger = Merger::new();
         info!("snapshot_received: {:?}", snapshot_received);
         info!("has_leader: {:?}", self.has_leader());
+
         loop {
             if self.should_quit {
                 warn!("Quitting raft");
@@ -514,7 +564,7 @@ impl<S: Store + 'static> RaftNode<S> {
                         // leader assign new id to peer
                         info!("received request from: {}", change.get_node_id());
                         let seq = self.seq.fetch_add(1, Ordering::Relaxed);
-                        client_send.insert(seq, chan);
+                        client_send.insert(seq, ReplyChan::One(chan));
                         if let Err(e) = self.propose_conf_change(serialize(&seq).unwrap(), change) {
                             error!("propose_conf_change, error: {:?}", e);
                         }
@@ -554,22 +604,16 @@ impl<S: Store + 'static> RaftNode<S> {
                         debug!("Message::Propose, send_wrong_leader {:?}", proposal);
                         self.send_wrong_leader(chan);
                     } else {
-                        if client_send.len() > 1000{  //@TODO configurable
+                        if client_send.len() > 1000 {
+                            //@TODO configurable
                             warn!(
                                 "Too many proposals, proposal in process: {}",
                                 client_send.len()
                             );
                             self.send_error(chan);
-                        }else {
-                            let seq = self.seq.fetch_add(1, Ordering::Relaxed);
-                            client_send.insert(seq, chan);
-                            let seq = serialize(&seq).unwrap();
-                            debug!(
-                                    "Message::Propose, seq: {:?}, client_send len: {}",
-                                    seq,
-                                    client_send.len()
-                                );
-                            self.propose(seq, proposal).unwrap();
+                        } else {
+                            merger.add(proposal, chan);
+                            self.take_and_propose(&mut merger, &mut client_send);
                         }
                     }
                 }
@@ -611,8 +655,10 @@ impl<S: Store + 'static> RaftNode<S> {
                     debug!("Message::ReportUnreachable, node_id: {}", node_id);
                     self.report_unreachable(node_id);
                 }
-                Ok(_) => unreachable!(),
-                Err(_) => (),
+                Ok(None) => unreachable!(),
+                Err(_) => {
+                    self.take_and_propose(&mut merger, &mut client_send);
+                }
             }
 
             let elapsed = now.elapsed();
@@ -631,7 +677,7 @@ impl<S: Store + 'static> RaftNode<S> {
     #[inline]
     async fn on_ready(
         &mut self,
-        client_send: &mut HashMap<u64, oneshot::Sender<RaftResponse>>,
+        client_send: &mut HashMap<u64, ReplyChan>,
     ) -> Result<()> {
         if !self.has_ready() {
             return Ok(());
@@ -654,25 +700,15 @@ impl<S: Store + 'static> RaftNode<S> {
         for message in ready.messages.drain(..) {
             //for message in ready.take_messages() {
             let client = match self.peer(message.get_to()) {
-                Some(peer) => peer.client().await,
+                Some(peer) => peer,
                 None => continue,
-            };
-
-            let client = match client {
-                Ok(c) => c,
-                Err(e) => {
-                    log::warn!("node_id: {}, {:?}", message.get_to(), e);
-                    continue;
-                }
             };
 
             let message_sender = MessageSender {
                 client_id: message.get_to(),
-                client, //: client.clone(),
+                client,
                 chan: self.snd.clone(),
                 message,
-                timeout: Duration::from_millis(100),
-                max_retries: 3,
             };
             if let Err(e) = self.msg_tx.try_send(message_sender) {
                 log::warn!("msg_tx.try_send, error: {:?}", e.to_string());
@@ -730,7 +766,7 @@ impl<S: Store + 'static> RaftNode<S> {
     async fn handle_config_change(
         &mut self,
         entry: &Entry,
-        senders: &mut HashMap<u64, oneshot::Sender<RaftResponse>>,
+        senders: &mut HashMap<u64, ReplyChan>,
     ) -> Result<()> {
         info!("handle_config_change, entry: {:?}", entry);
         let seq: u64 = deserialize(entry.get_context())?;
@@ -776,8 +812,10 @@ impl<S: Store + 'static> RaftNode<S> {
                 ConfChangeType::RemoveNode => RaftResponse::Ok,
                 _ => unimplemented!(),
             };
-            if sender.send(response).is_err() {
-                error!("error sending response")
+            if let ReplyChan::One(sender) = sender {
+                if sender.send(response).is_err() {
+                    error!("error sending response")
+                }
             }
         }
         Ok(())
@@ -787,21 +825,52 @@ impl<S: Store + 'static> RaftNode<S> {
     async fn handle_normal(
         &mut self,
         entry: &Entry,
-        senders: &mut HashMap<u64, oneshot::Sender<RaftResponse>>,
+        senders: &mut HashMap<u64, ReplyChan>,
     ) -> Result<()> {
         let seq: u64 = deserialize(entry.get_context())?;
-        let data = self.store.apply(entry.get_data()).await?;
-        if let Some(sender) = senders.remove(&seq) {
-            debug!(
-                "[handle_normal] apply reply data.len: {:?}, seq:{}",
-                data.len(),
-                seq
-            );
-            if let Err(resp) = sender.send(RaftResponse::Response { data }) {
-                warn!(
-                    "[handle_normal] send RaftResponse error, {:?}, seq:{}, senders.len(): {}",
-                    resp, seq, senders.len()
+        debug!(
+            "[handle_normal] seq:{}, senders.len(): {}",
+            seq, senders.len()
+        );
+
+        match (deserialize::<Proposals>(entry.get_data())?, senders.remove(&seq)) {
+            (Proposals::One(data), chan) => {
+                let reply = self.store.apply(&data).await?;
+                if let Some(ReplyChan::One(chan)) = chan {
+                    debug!(
+                        "[handle_normal] ReplyChan::Chan, seq:{}, senders.len(): {}, chans.len(): {}, apply_datas.len(): {}",
+                        seq, senders.len(), 1, 1
+                    );
+                    if let Err(_resp) = chan.send(RaftResponse::Response { data: reply }) {
+                        warn!(
+                            "[handle_normal] send RaftResponse error, seq:{}, senders.len(): {}",
+                            seq, senders.len()
+                        );
+                    }
+                }
+            }
+            (Proposals::More(mut datas), chans) => {
+                let mut chans = if let Some(ReplyChan::More(chans)) = chans {
+                    Some(chans)
+                } else {
+                    None
+                };
+                debug!(
+                    "[handle_normal] ReplyChan::More, seq:{}, senders.len(): {}, chans.len(): {:?}, datas.len(): {}",
+                    seq, senders.len(), chans.as_ref().map(|c|c.len()), datas.len()
                 );
+
+                while let Some(data) = datas.pop() {
+                    let reply = self.store.apply(&data).await?;
+                    if let Some(chan) = chans.as_mut().and_then(|cs| cs.pop()) {
+                        if let Err(_resp) = chan.send(RaftResponse::Response { data: reply }) {
+                            warn!(
+                                "[handle_normal] send RaftResponse error, seq:{}, senders.len(): {}",
+                                seq, senders.len()
+                            );
+                        }
+                    }
+                }
             }
         }
 
