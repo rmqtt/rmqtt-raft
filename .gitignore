@@ -1,4 +1,5 @@
 # Default ignored files
+Cargo.lock
 /target
 /.git
 /.idea
