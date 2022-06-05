@@ -1,10 +1,13 @@
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::time::Duration;
+use std::sync::atomic::{AtomicIsize, Ordering};
+use std::sync::Arc;
 
 use bincode::serialize;
-use log::{error, info, warn};
-use tokio::sync::mpsc;
-use tokio::sync::oneshot;
+use log::{info, warn};
+use futures::channel::{mpsc, oneshot};
+use futures::SinkExt;
+
 use tokio::time::timeout;
 use tonic::{Request, Response, Status};
 use tonic::transport::Server;
@@ -45,11 +48,14 @@ impl RaftService for RaftServer {
         &self,
         _: Request<Empty>,
     ) -> Result<Response<raft_service::IdRequestReponse>, Status> {
-        let sender = self.snd.clone();
+        let mut sender = self.snd.clone();
         let (tx, rx) = oneshot::channel();
         let _ = sender.send(Message::RequestId { chan: tx }).await;
-        let response = rx.await.unwrap();
-        match response {
+        //let response = rx.await;
+        let reply = timeout(Duration::from_secs(3), rx).await  //@TODO configurable
+            .map_err(|_e| Status::unavailable("recv timeout for reply"))?
+            .map_err(|_e| Status::unavailable("recv canceled for reply"))?;
+        match reply {
             RaftResponse::WrongLeader {
                 leader_id,
                 leader_addr,
@@ -78,7 +84,7 @@ impl RaftService for RaftServer {
         let change = protobuf::Message::parse_from_bytes(req.into_inner().inner.as_ref())
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
 
-        let sender = self.snd.clone();
+        let mut sender = self.snd.clone();
 
         let (tx, rx) = oneshot::channel();
 
@@ -86,20 +92,20 @@ impl RaftService for RaftServer {
 
         match sender.send(message).await {
             Ok(_) => (),
-            Err(_) => error!("send error"),
+            Err(_) => warn!("send error"),
         }
 
         let mut reply = raft_service::RaftResponse::default();
 
-        // if we don't receive a response after 2secs, we timeout
-        match timeout(Duration::from_secs(5), rx).await {
+        // if we don't receive a response after 3secs, we timeout
+        match timeout(Duration::from_secs(3), rx).await {
             Ok(Ok(raft_response)) => {
                 reply.inner = serialize(&raft_response).expect("serialize error");
             }
             Ok(_) => (),
             Err(e) => {
                 reply.inner = serialize(&RaftResponse::Error).unwrap();
-                error!("timeout waiting for reply, {:?}", e);
+                warn!("timeout waiting for reply, {:?}", e);
             }
         }
 
@@ -110,51 +116,69 @@ impl RaftService for RaftServer {
         &self,
         request: Request<RiteraftMessage>,
     ) -> Result<Response<raft_service::RaftResponse>, Status> {
-        // let message = request.into_inner();
         let message = protobuf::Message::parse_from_bytes(request.into_inner().inner.as_ref())
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
-
-        // again this ugly shit to serialize the message
-        let sender = self.snd.clone();
-        match sender.send(Message::Raft(Box::new(message))).await {
-            Ok(_) => (),
-            Err(e) => error!("send message error, {:?}", e.to_string()),
-        }
-
-        let response = RaftResponse::Ok;
-        Ok(Response::new(raft_service::RaftResponse {
-            inner: serialize(&response).unwrap(),
-        }))
+        SEND_MESSAGE_ACTIVE_REQUESTS.fetch_add(1, Ordering::SeqCst);
+        let reply = match self.snd.clone().try_send(Message::Raft(Box::new(message))) {
+            Ok(()) => {
+                let response = RaftResponse::Ok;
+                Ok(Response::new(raft_service::RaftResponse {
+                    inner: serialize(&response).unwrap(),
+                }))
+            },
+            Err(_) => {
+                Err(Status::unavailable("error for try send message"))
+            },
+        };
+        SEND_MESSAGE_ACTIVE_REQUESTS.fetch_sub(1, Ordering::SeqCst);
+        reply
     }
 
-    async fn forward(
+    async fn send_proposal(
         &self,
         req: Request<raft_service::Proposal>,
     ) -> Result<Response<raft_service::RaftResponse>, Status> {
+        SEND_PROPOSAL_ACTIVE_REQUESTS.fetch_add(1, Ordering::SeqCst);
         let proposal = req.into_inner().inner;
-        let sender = self.snd.clone();
+        let mut sender = self.snd.clone();
         let (tx, rx) = oneshot::channel();
         let message = Message::Propose { proposal, chan: tx };
-        match sender.send(message).await {
-            Ok(_) => (),
-            Err(_) => error!("send forward error"),
-        }
 
-        let mut reply = raft_service::RaftResponse::default();
-
-        // if we don't receive a response after 2secs, we timeout
-        match timeout(Duration::from_secs(5), rx).await {
-            Ok(Ok(raft_response)) => {
-                reply.inner = serialize(&raft_response).expect("serialize error");
+        let reply = match sender.try_send(message) {
+            Ok(()) => {
+                let reply = match timeout(Duration::from_secs(3), rx).await { //@TODO configurable
+                    Ok(Ok(raft_response)) => {
+                        match serialize(&raft_response){
+                            Ok(resp) => {
+                                Ok(Response::new(raft_service::RaftResponse {
+                                    inner: resp
+                                }))
+                            },
+                            Err(e) => {
+                                warn!("serialize error, {}", e);
+                                Err(Status::unavailable("serialize error"))
+                            }
+                        }
+                    }
+                    Ok(Err(e)) => {
+                        warn!("recv error for reply, {}", e);
+                        Err(Status::unavailable("recv error for reply"))
+                    },
+                    Err(e) => {
+                        warn!("timeout waiting for reply, {}", e);
+                        Err(Status::unavailable("timeout waiting for reply"))
+                    }
+                };
+                reply
+            },
+            Err(e) => {
+                warn!("error for try send message, {}", e);
+                Err(Status::unavailable("error for try send message"))
             }
-            Ok(_) => (),
-            Err(_e) => {
-                reply.inner = serialize(&RaftResponse::Error).unwrap();
-                error!("timeout waiting for reply");
-            }
-        }
+        };
 
-        Ok(Response::new(reply))
+        SEND_PROPOSAL_ACTIVE_REQUESTS.fetch_sub(1, Ordering::SeqCst);
+        reply
     }
 
     async fn send_query(
@@ -162,26 +186,46 @@ impl RaftService for RaftServer {
         req: Request<raft_service::Query>,
     ) -> Result<Response<raft_service::RaftResponse>, Status> {
         let query = req.into_inner().inner;
-        let sender = self.snd.clone();
+        let mut sender = self.snd.clone();
         let (tx, rx) = oneshot::channel();
         let message = Message::Query { query, chan: tx };
-        match sender.send(message).await {
-            Ok(_) => (),
-            Err(_) => error!("send query error"),
-        }
         let mut reply = raft_service::RaftResponse::default();
-        // if we don't receive a response after 2secs, we timeout
-        match timeout(Duration::from_secs(5), rx).await {
-            Ok(Ok(raft_response)) => {
-                reply.inner = serialize(&raft_response).expect("serialize error");
-            }
-            Ok(_) => (),
-            Err(_e) => {
+        match sender.try_send(message) {
+            Ok(()) => {
+                // if we don't receive a response after 2secs, we timeout
+                match timeout(Duration::from_secs(3), rx).await {
+                    Ok(Ok(raft_response)) => {
+                        reply.inner = serialize(&raft_response).expect("serialize error");
+                    }
+                    Ok(Err(e)) => {
+                        reply.inner = serialize(&RaftResponse::Error).expect("serialize error");
+                        warn!("send query error, {}", e);
+                    },
+                    Err(_e) => {
+                        reply.inner = serialize(&RaftResponse::Error).unwrap();
+                        warn!("timeout waiting for send query reply");
+                    }
+                }
+            },
+            Err(e) => {
                 reply.inner = serialize(&RaftResponse::Error).unwrap();
-                error!("timeout waiting for reply");
+                warn!("send query error, {}", e)
             }
         }
 
         Ok(Response::new(reply))
     }
+}
+
+lazy_static::lazy_static! {
+    static ref SEND_PROPOSAL_ACTIVE_REQUESTS: Arc<AtomicIsize> = Arc::new(AtomicIsize::new(0));
+    static ref SEND_MESSAGE_ACTIVE_REQUESTS: Arc<AtomicIsize> = Arc::new(AtomicIsize::new(0));
+}
+
+pub fn send_proposal_active_requests() -> isize {
+    SEND_PROPOSAL_ACTIVE_REQUESTS.load(Ordering::SeqCst)
+}
+
+pub fn send_message_active_requests() -> isize {
+    SEND_MESSAGE_ACTIVE_REQUESTS.load(Ordering::SeqCst)
 }

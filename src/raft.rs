@@ -4,9 +4,12 @@ use std::time::Duration;
 use async_trait::async_trait;
 use bincode::{deserialize, serialize};
 use futures::future::FutureExt;
-use log::{debug, error, info, warn};
+use log::{debug, info, warn};
 use raft::eraftpb::{ConfChange, ConfChangeType};
-use tokio::sync::{mpsc, oneshot};
+// use tokio::sync::{mpsc, oneshot};
+use futures::channel::{mpsc, oneshot};
+use futures::SinkExt;
+
 use tokio::time::timeout;
 use tonic::Request;
 
@@ -15,12 +18,9 @@ use crate::message::{Message, RaftResponse, Status};
 use crate::raft_node::{Peer, RaftNode};
 use crate::raft_server::RaftServer;
 use crate::raft_service::{ConfChange as RiteraftConfChange, Empty, ResultCode};
-use crate::raft_service::Proposal;
 use crate::raft_service::raft_service_client::RaftServiceClient;
 
 type DashMap<K, V> = dashmap::DashMap<K, V, ahash::RandomState>;
-
-pub type RaftGrpcClient = RaftServiceClient<tonic::transport::channel::Channel>;
 
 #[async_trait]
 pub trait Store {
@@ -32,39 +32,24 @@ pub trait Store {
 
 struct ProposalSender {
     proposal: Vec<u8>,
-    client: RaftGrpcClient,
-    //chan: oneshot::Sender<RaftResponse>,
-    max_retries: usize,
-    timeout: Duration,
+    client: Peer,
 }
 
+
 impl ProposalSender {
-    async fn send(mut self) -> Result<RaftResponse> {
-        let mut current_retry = 0usize;
-        loop {
-            let message_request = Request::new(Proposal {
-                inner: self.proposal.clone(),
-            });
-            match self.client.forward(message_request).await {
-                Ok(grpc_response) => {
-                    let raft_response: RaftResponse =
-                        deserialize(&grpc_response.into_inner().inner).expect("deserialize error");
-                    //let _ = self.chan.send(raft_response);
-                    return Ok(raft_response);
-                }
-                Err(e) => {
-                    if current_retry < self.max_retries {
-                        current_retry += 1;
-                        tokio::time::sleep(self.timeout).await;
-                    } else {
-                        error!(
-                            "error sending proposal after {} retries: {}",
-                            self.max_retries, e
-                        );
-                        //let _ = self.chan.send(RaftResponse::Error);
-                        return Err(Error::RemoteCall(e));
-                    }
-                }
+    async fn send(self) -> Result<RaftResponse> {
+        match self.client.send_proposal(self.proposal.clone()).await {
+            Ok(reply) => {
+                let raft_response: RaftResponse =
+                    deserialize(&reply)?;
+                Ok(raft_response)
+            }
+            Err(e) => {
+                warn!(
+                    "error sending proposal after {:?}",
+                    e
+                );
+                Err(e)
             }
         }
     }
@@ -77,91 +62,125 @@ pub struct Mailbox {
     sender: mpsc::Sender<Message>,
 }
 
+use std::sync::atomic::{AtomicIsize, Ordering};
+lazy_static::lazy_static! {
+    static ref MAILBOX_SENDS: Arc<AtomicIsize> = Arc::new(AtomicIsize::new(0));
+    static ref MAILBOX_QUERYS: Arc<AtomicIsize> = Arc::new(AtomicIsize::new(0));
+}
+
+pub fn active_mailbox_sends() -> isize {
+    MAILBOX_SENDS.load(Ordering::SeqCst)
+}
+
+pub fn active_mailbox_querys() -> isize {
+    MAILBOX_QUERYS.load(Ordering::SeqCst)
+}
+
 impl Mailbox {
-    async fn peer(&self, leader_id: u64, leader_addr: String) -> Result<RaftGrpcClient> {
-        let peer = self
+
+    #[inline]
+    pub fn pears(&self) -> Vec<(u64, Peer)>{
+        self
+            .peers
+            .iter().map(|p|{
+                let (id, _) = p.key();
+                (*id, p.value().clone())
+            }).collect::<Vec<_>>()
+    }
+
+    #[inline]
+    async fn peer(&self, leader_id: u64, leader_addr: String) -> Peer {
+        self
             .peers
             .entry((leader_id, leader_addr.clone()))
             .or_insert_with(|| Peer::new(leader_addr))
-            .clone();
-        peer.client().await
+            .clone()
     }
 
+    #[inline]
     async fn send_to_leader(
         &self,
         proposal: Vec<u8>,
         leader_id: u64,
         leader_addr: String,
     ) -> Result<RaftResponse> {
-        let leader_client = self.peer(leader_id, leader_addr).await?;
+        let peer = self.peer(leader_id, leader_addr).await;
         let proposal_sender = ProposalSender {
             proposal,
-            client: leader_client,
-            timeout: Duration::from_millis(1000),
-            max_retries: 0,
+            client: peer,
         };
         proposal_sender.send().await
     }
 
-    /// sends a proposal message to commit to the node. This fails if the current node is not the
-    /// leader
+    #[inline]
     pub async fn send(&self, message: Vec<u8>) -> Result<Vec<u8>> {
-        let (tx, rx) = oneshot::channel();
-        let proposal = Message::Propose {
-            proposal: message.clone(),
-            chan: tx,
-        };
-        let sender = self.sender.clone();
-        // TODO make timeout duration a variable
-        match sender.send(proposal).await {
-            Ok(_) => match timeout(Duration::from_secs(15), rx).await {
-                Ok(Ok(RaftResponse::Response { data })) => Ok(data),
-                Ok(Ok(RaftResponse::WrongLeader {
-                          leader_id,
-                          leader_addr,
-                      })) => {
-                    debug!(
-                        "this node not is Leader, leader_id: {:?}, leader_addr: {:?}",
-                        leader_id, leader_addr
-                    );
-                    if let Some(leader_addr) = leader_addr {
-                        if leader_id != 0 {
-                            let resp = self.send_to_leader(message, leader_id, leader_addr).await?;
-                            if let RaftResponse::Response { data } = resp {
-                                return Ok(data);
-                            } else {
-                                warn!("recv other raft response: {:?}", resp);
-                                return Err(Error::Unknown);
-                            }
-                        }
-                    }
-                    Err(Error::LeaderNotExist)
-                }
-                Ok(Ok(resp)) => {
-                    warn!("recv other raft response: {:?}", resp);
-                    Err(Error::Unknown)
-                }
-                Ok(Err(e)) => {
-                    error!("recv error, {:?}", e);
-                    Err(Error::Unknown)
-                }
-                Err(e) => {
-                    error!("timeout, {:?}", e);
-                    Err(Error::Unknown)
-                }
-            },
-            Err(e) => {
-                error!("send error, {:?}", e.to_string());
-                Err(Error::Unknown)
-            }
-        }
+        MAILBOX_SENDS.fetch_add(1, Ordering::SeqCst);
+        let reply = self._send(message).await;
+        MAILBOX_SENDS.fetch_sub(1, Ordering::SeqCst);
+        reply
     }
 
+    #[inline]
+    async fn _send(&self, message: Vec<u8>) -> Result<Vec<u8>> {
+        let (leader_id, leader_addr) = {
+            let (tx, rx) = oneshot::channel();
+            let proposal = Message::Propose {
+                proposal: message.clone(),
+                chan: tx,
+            };
+            let mut sender = self.sender.clone();
+            sender.try_send(proposal)
+                .map_err(|e| Error::SendError(e.to_string()))?;
+            let reply = timeout(Duration::from_secs(3), rx).await; //@TODO configurable
+            let reply = reply.map_err(|e| Error::RecvError(e.to_string()))?
+                .map_err(|e| Error::RecvError(e.to_string()))?;
+            match reply {
+                RaftResponse::Response { data } => return Ok(data),
+                RaftResponse::WrongLeader { leader_id, leader_addr } => {
+                    (leader_id, leader_addr)
+                }
+                RaftResponse::Error => return Err(Error::Unknown),
+                _ => {
+                    warn!("recv other raft response: {:?}", reply);
+                    return Err(Error::Unknown)
+                }
+            }
+        };
+
+        debug!(
+            "this node not is Leader, leader_id: {:?}, leader_addr: {:?}",
+            leader_id, leader_addr
+        );
+
+        if let Some(leader_addr) = leader_addr {
+            if leader_id != 0 {
+                let resp = self.send_to_leader(message, leader_id, leader_addr.clone()).await?;
+                return if let RaftResponse::Response { data } = resp {
+                    Ok(data)
+                } else {
+                    warn!("recv other raft response, leader_id: {}, leader_addr: {:?}, {:?}", leader_id, leader_addr, resp);
+                    Err(Error::Unknown)
+                }
+            }
+        }
+
+        Err(Error::LeaderNotExist)
+    }
+
+    #[inline]
     pub async fn query(&self, query: Vec<u8>) -> Result<Vec<u8>> {
+        MAILBOX_QUERYS.fetch_add(1, Ordering::SeqCst);
+        let reply = self._query(query).await;
+        MAILBOX_QUERYS.fetch_sub(1, Ordering::SeqCst);
+        reply
+    }
+
+    #[inline]
+    async fn _query(&self, query: Vec<u8>) -> Result<Vec<u8>> {
         let (tx, rx) = oneshot::channel();
-        let sender = self.sender.clone();
-        match sender.send(Message::Query { query, chan: tx }).await {
-            Ok(_) => match timeout(Duration::from_secs(5), rx).await {
+        let mut sender = self.sender.clone();
+        match sender.try_send(Message::Query { query, chan: tx }) {
+            Ok(_) => match timeout(Duration::from_secs(5), rx).await { //@TODO configurable
                 Ok(Ok(RaftResponse::Response { data })) => Ok(data),
                 _ => Err(Error::Unknown),
             },
@@ -169,12 +188,13 @@ impl Mailbox {
         }
     }
 
+    #[inline]
     pub async fn leave(&self) -> Result<()> {
         let mut change = ConfChange::default();
         // set node id to 0, the node will set it to self when it receives it.
         change.set_node_id(0);
         change.set_change_type(ConfChangeType::RemoveNode);
-        let sender = self.sender.clone();
+        let mut sender = self.sender.clone();
         let (chan, rx) = oneshot::channel();
         match sender.send(Message::ConfigChange { change, chan }).await {
             Ok(_) => match rx.await {
@@ -185,11 +205,12 @@ impl Mailbox {
         }
     }
 
+    #[inline]
     pub async fn status(&self) -> Result<Status> {
         let (tx, rx) = oneshot::channel();
-        let sender = self.sender.clone();
+        let mut sender = self.sender.clone();
         match sender.send(Message::Status { chan: tx }).await {
-            Ok(_) => match timeout(Duration::from_secs(5), rx).await {
+            Ok(_) => match timeout(Duration::from_secs(5), rx).await {  //@TODO configurable
                 Ok(Ok(RaftResponse::Status(status))) => Ok(status),
                 _ => Err(Error::Unknown),
             },
@@ -209,7 +230,7 @@ pub struct Raft<S: Store + 'static> {
 impl<S: Store + Send + Sync + 'static> Raft<S> {
     /// creates a new node with the given address and store.
     pub fn new(addr: String, store: S, logger: slog::Logger) -> Self {
-        let (tx, rx) = mpsc::channel(100);
+        let (tx, rx) = mpsc::channel(10000);
         Self {
             store,
             tx,

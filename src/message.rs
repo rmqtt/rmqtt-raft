@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use raft::eraftpb::{ConfChange, Message as RaftMessage};
 use serde::{Deserialize, Serialize};
-use tokio::sync::oneshot::Sender;
+use futures::channel::oneshot::Sender;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub enum RaftResponse {
@@ -55,6 +55,11 @@ pub enum Message {
 pub struct Status {
     pub id: u64,
     pub leader_id: u64,
+    pub uncommitteds: usize,
+    pub active_mailbox_sends: isize,
+    pub active_mailbox_querys: isize,
+    pub active_send_proposal_grpc_requests: isize,
+    pub active_send_message_grpc_requests: isize,
     pub peers: HashMap<u64, String>,
 }
 
@@ -140,4 +145,75 @@ impl Merger {
     fn timeout(&self) -> bool {
         chrono::Local::now().timestamp_millis() > (self.start_collection_time + 200)  //@TODO configurable, 200 millisecond
     }
+}
+
+#[tokio::test]
+async fn test_merger() -> std::result::Result<(), Box<dyn std::error::Error>> {
+    let mut merger = Merger::new();
+    use std::time::Duration;
+    use futures::channel::oneshot::channel;
+
+    let add = |merger: &mut Merger| {
+        let (tx, rx) = channel();
+        merger.add(vec![1, 2, 3], tx);
+        rx
+    };
+
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicI64, Ordering};
+    const MAX: i64 = 111;
+    let count = Arc::new(AtomicI64::new(0));
+    let mut futs = Vec::new();
+    for _ in 0..MAX{
+        let rx = add(&mut merger);
+        let count1 = count.clone();
+        let fut = async move{
+            let r = tokio::time::timeout(Duration::from_secs(3), rx).await;
+            match r{
+                Ok(_) => {},
+                Err(_) => {
+                    println!("timeout ...");
+                }
+            }
+            count1.fetch_add(1, Ordering::SeqCst);
+        };
+
+        futs.push(fut);
+    }
+
+    let sends = async {
+        loop {
+            if let Some((_data, chan)) = merger.take() {
+                match chan {
+                    ReplyChan::One(tx) => {
+                        let _ = tx.send(RaftResponse::Ok);
+                    },
+                    ReplyChan::More(txs) => {
+                        for tx in txs {
+                            let _ = tx.send(RaftResponse::Ok);
+                        }
+                    }
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            if merger.len() == 0{
+                break
+            }
+        }
+    };
+
+    let count_p = count.clone();
+    let count_print = async move {
+        loop{
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            println!("count_p: {}", count_p.load(Ordering::SeqCst));
+            if count_p.load(Ordering::SeqCst) >= MAX{
+                break;
+            }
+        }
+    };
+    println!("futs: {}", futs.len());
+    futures::future::join3(futures::future::join_all(futs), sends, count_print).await;
+
+    Ok(())
 }

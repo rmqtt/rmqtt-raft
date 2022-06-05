@@ -20,12 +20,18 @@ pub enum Error {
     Unknown,
     #[error("leader does not exist")]
     LeaderNotExist,
+    #[error("Not a Leader")]
+    NotLeader,
     #[error("protobuf error: `{0}`")]
     ProtobufError(#[from] protobuf::ProtobufError),
     #[error("timeout")]
     Elapsed,
     #[error("{0}")]
     Msg(String),
+    #[error("send error, {0}")]
+    SendError(String),
+    #[error("recv error, {0}")]
+    RecvError(String),
 }
 
 impl Error {
