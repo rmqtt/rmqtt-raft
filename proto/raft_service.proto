@@ -7,7 +7,7 @@ service RaftService {
   rpc RequestId(Empty) returns (IdRequestReponse) {}
   rpc ChangeConfig(ConfChange) returns (RaftResponse) {}
   rpc SendMessage(Message) returns (RaftResponse) {}
-  rpc Forward(Proposal) returns (RaftResponse) {}
+  rpc SendProposal(Proposal) returns (RaftResponse) {}
   rpc SendQuery(Query) returns (RaftResponse) {}
 }
 
