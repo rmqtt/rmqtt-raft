@@ -1,6 +1,6 @@
 [package]
 name = "rmqtt-raft"
-version = "0.1.1"
+version = "0.1.2"
 authors = ["rmqtt-rs <rmqttd@126.com>"]
 edition = "2018"
 license = "MIT/Apache-2.0"
