@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
+use futures::channel::oneshot::Sender;
 use raft::eraftpb::{ConfChange, Message as RaftMessage};
 use serde::{Deserialize, Serialize};
-use futures::channel::oneshot::Sender;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub enum RaftResponse {
@@ -164,13 +164,13 @@ async fn test_merger() -> std::result::Result<(), Box<dyn std::error::Error>> {
     const MAX: i64 = 111;
     let count = Arc::new(AtomicI64::new(0));
     let mut futs = Vec::new();
-    for _ in 0..MAX{
+    for _ in 0..MAX {
         let rx = add(&mut merger);
         let count1 = count.clone();
-        let fut = async move{
+        let fut = async move {
             let r = tokio::time::timeout(Duration::from_secs(3), rx).await;
-            match r{
-                Ok(_) => {},
+            match r {
+                Ok(_) => {}
                 Err(_) => {
                     println!("timeout ...");
                 }
@@ -187,7 +187,7 @@ async fn test_merger() -> std::result::Result<(), Box<dyn std::error::Error>> {
                 match chan {
                     ReplyChan::One(tx) => {
                         let _ = tx.send(RaftResponse::Ok);
-                    },
+                    }
                     ReplyChan::More(txs) => {
                         for tx in txs {
                             let _ = tx.send(RaftResponse::Ok);
@@ -196,18 +196,18 @@ async fn test_merger() -> std::result::Result<(), Box<dyn std::error::Error>> {
                 }
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
-            if merger.len() == 0{
-                break
+            if merger.len() == 0 {
+                break;
             }
         }
     };
 
     let count_p = count.clone();
     let count_print = async move {
-        loop{
+        loop {
             tokio::time::sleep(Duration::from_secs(2)).await;
             println!("count_p: {}", count_p.load(Ordering::SeqCst));
-            if count_p.load(Ordering::SeqCst) >= MAX{
+            if count_p.load(Ordering::SeqCst) >= MAX {
                 break;
             }
         }

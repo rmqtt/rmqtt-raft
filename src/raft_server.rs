@@ -1,13 +1,12 @@
 use std::net::{SocketAddr, ToSocketAddrs};
-use std::time::Duration;
-use std::sync::atomic::{AtomicIsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicIsize, Ordering};
+use std::time::Duration;
 
 use bincode::serialize;
-use log::{info, warn};
 use futures::channel::{mpsc, oneshot};
 use futures::SinkExt;
-
+use log::{info, warn};
 use tokio::time::timeout;
 use tonic::{Request, Response, Status};
 use tonic::transport::Server;
@@ -125,10 +124,10 @@ impl RaftService for RaftServer {
                 Ok(Response::new(raft_service::RaftResponse {
                     inner: serialize(&response).unwrap(),
                 }))
-            },
+            }
             Err(_) => {
                 Err(Status::unavailable("error for try send message"))
-            },
+            }
         };
         SEND_MESSAGE_ACTIVE_REQUESTS.fetch_sub(1, Ordering::SeqCst);
         reply
@@ -148,12 +147,12 @@ impl RaftService for RaftServer {
             Ok(()) => {
                 let reply = match timeout(Duration::from_secs(3), rx).await { //@TODO configurable
                     Ok(Ok(raft_response)) => {
-                        match serialize(&raft_response){
+                        match serialize(&raft_response) {
                             Ok(resp) => {
                                 Ok(Response::new(raft_service::RaftResponse {
                                     inner: resp
                                 }))
-                            },
+                            }
                             Err(e) => {
                                 warn!("serialize error, {}", e);
                                 Err(Status::unavailable("serialize error"))
@@ -163,14 +162,14 @@ impl RaftService for RaftServer {
                     Ok(Err(e)) => {
                         warn!("recv error for reply, {}", e);
                         Err(Status::unavailable("recv error for reply"))
-                    },
+                    }
                     Err(e) => {
                         warn!("timeout waiting for reply, {}", e);
                         Err(Status::unavailable("timeout waiting for reply"))
                     }
                 };
                 reply
-            },
+            }
             Err(e) => {
                 warn!("error for try send message, {}", e);
                 Err(Status::unavailable("error for try send message"))
@@ -200,13 +199,13 @@ impl RaftService for RaftServer {
                     Ok(Err(e)) => {
                         reply.inner = serialize(&RaftResponse::Error).expect("serialize error");
                         warn!("send query error, {}", e);
-                    },
+                    }
                     Err(_e) => {
                         reply.inner = serialize(&RaftResponse::Error).unwrap();
                         warn!("timeout waiting for send query reply");
                     }
                 }
-            },
+            }
             Err(e) => {
                 reply.inner = serialize(&RaftResponse::Error).unwrap();
                 warn!("send query error, {}", e)

@@ -1,15 +1,14 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicIsize, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use bincode::{deserialize, serialize};
+use futures::channel::{mpsc, oneshot};
 use futures::future::FutureExt;
+use futures::SinkExt;
 use log::{debug, info, warn};
 use raft::eraftpb::{ConfChange, ConfChangeType};
-// use tokio::sync::{mpsc, oneshot};
-use futures::channel::{mpsc, oneshot};
-use futures::SinkExt;
-
 use tokio::time::timeout;
 use tonic::Request;
 
@@ -38,7 +37,7 @@ struct ProposalSender {
 
 impl ProposalSender {
     async fn send(self) -> Result<RaftResponse> {
-        match self.client.send_proposal(self.proposal.clone()).await {
+        match self.client.send_proposal(self.proposal).await {
             Ok(reply) => {
                 let raft_response: RaftResponse =
                     deserialize(&reply)?;
@@ -62,7 +61,6 @@ pub struct Mailbox {
     sender: mpsc::Sender<Message>,
 }
 
-use std::sync::atomic::{AtomicIsize, Ordering};
 lazy_static::lazy_static! {
     static ref MAILBOX_SENDS: Arc<AtomicIsize> = Arc::new(AtomicIsize::new(0));
     static ref MAILBOX_QUERYS: Arc<AtomicIsize> = Arc::new(AtomicIsize::new(0));
@@ -77,15 +75,14 @@ pub fn active_mailbox_querys() -> isize {
 }
 
 impl Mailbox {
-
     #[inline]
-    pub fn pears(&self) -> Vec<(u64, Peer)>{
+    pub fn pears(&self) -> Vec<(u64, Peer)> {
         self
             .peers
-            .iter().map(|p|{
-                let (id, _) = p.key();
-                (*id, p.value().clone())
-            }).collect::<Vec<_>>()
+            .iter().map(|p| {
+            let (id, _) = p.key();
+            (*id, p.value().clone())
+        }).collect::<Vec<_>>()
     }
 
     #[inline]
@@ -142,7 +139,7 @@ impl Mailbox {
                 RaftResponse::Error => return Err(Error::Unknown),
                 _ => {
                     warn!("recv other raft response: {:?}", reply);
-                    return Err(Error::Unknown)
+                    return Err(Error::Unknown);
                 }
             }
         };
@@ -160,7 +157,7 @@ impl Mailbox {
                 } else {
                     warn!("recv other raft response, leader_id: {}, leader_addr: {:?}, {:?}", leader_id, leader_addr, resp);
                     Err(Error::Unknown)
-                }
+                };
             }
         }
 
