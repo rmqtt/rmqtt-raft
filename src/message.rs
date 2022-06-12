@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-
+use std::time::Instant;
 use futures::channel::oneshot::Sender;
 use raft::eraftpb::{ConfChange, Message as RaftMessage};
 use serde::{Deserialize, Serialize};
@@ -76,8 +76,8 @@ impl Status {
 }
 
 pub(crate) enum ReplyChan {
-    One(Sender<RaftResponse>),
-    More(Vec<Sender<RaftResponse>>),
+    One((Sender<RaftResponse>, Instant)),
+    More(Vec<(Sender<RaftResponse>, Instant)>),
 }
 
 #[derive(Serialize, Deserialize)]
@@ -89,7 +89,7 @@ pub(crate) enum Proposals {
 
 pub(crate) struct Merger {
     proposals: Vec<Vec<u8>>,
-    chans: Vec<Sender<RaftResponse>>,
+    chans: Vec<(Sender<RaftResponse>, Instant)>,
     start_collection_time: i64,
 }
 
@@ -106,7 +106,7 @@ impl Merger {
     #[inline]
     pub fn add(&mut self, proposal: Vec<u8>, chan: Sender<RaftResponse>) {
         self.proposals.push(proposal);
-        self.chans.push(chan);
+        self.chans.push((chan, Instant::now()));
     }
 
     #[inline]
@@ -185,11 +185,11 @@ async fn test_merger() -> std::result::Result<(), Box<dyn std::error::Error>> {
         loop {
             if let Some((_data, chan)) = merger.take() {
                 match chan {
-                    ReplyChan::One(tx) => {
+                    ReplyChan::One((tx, _)) => {
                         let _ = tx.send(RaftResponse::Ok);
                     }
                     ReplyChan::More(txs) => {
-                        for tx in txs {
+                        for (tx, _) in txs {
                             let _ = tx.send(RaftResponse::Ok);
                         }
                     }
