@@ -45,7 +45,7 @@ impl ProposalSender {
             }
             Err(e) => {
                 warn!(
-                    "error sending proposal after {:?}",
+                    "error sending proposal {:?}",
                     e
                 );
                 Err(e)
@@ -138,26 +138,30 @@ impl Mailbox {
                 }
                 RaftResponse::Error => return Err(Error::Unknown),
                 _ => {
-                    warn!("recv other raft response: {:?}", reply);
+                    warn!("Recv other raft response: {:?}", reply);
                     return Err(Error::Unknown);
                 }
             }
         };
 
         debug!(
-            "this node not is Leader, leader_id: {:?}, leader_addr: {:?}",
+            "This node not is Leader, leader_id: {:?}, leader_addr: {:?}",
             leader_id, leader_addr
         );
 
         if let Some(leader_addr) = leader_addr {
             if leader_id != 0 {
-                let resp = self.send_to_leader(message, leader_id, leader_addr.clone()).await?;
-                return if let RaftResponse::Response { data } = resp {
-                    Ok(data)
-                } else {
-                    warn!("recv other raft response, leader_id: {}, leader_addr: {:?}, {:?}", leader_id, leader_addr, resp);
-                    Err(Error::Unknown)
-                };
+                return match self.send_to_leader(message, leader_id, leader_addr.clone()).await?{
+                    RaftResponse::Response { data } => Ok(data),
+                    RaftResponse::WrongLeader { leader_id, leader_addr } => {
+                        warn!("The target node is not the Leader, leader_id: {}, leader_addr: {:?}", leader_id, leader_addr);
+                        Err(Error::NotLeader)
+                    },
+                    _ => {
+                        warn!("Recv other raft response, leader_id: {}, leader_addr: {:?}", leader_id, leader_addr);
+                        Err(Error::Unknown)
+                    }
+                }
             }
         }
 
@@ -227,7 +231,7 @@ pub struct Raft<S: Store + 'static> {
 impl<S: Store + Send + Sync + 'static> Raft<S> {
     /// creates a new node with the given address and store.
     pub fn new(addr: String, store: S, logger: slog::Logger) -> Self {
-        let (tx, rx) = mpsc::channel(10000);
+        let (tx, rx) = mpsc::channel(100_000);
         Self {
             store,
             tx,
