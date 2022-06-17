@@ -228,7 +228,7 @@ impl Peer {
     #[inline]
     pub async fn send_message(&self, msg: &RaftMessage) -> Result<Vec<u8>> {
         if !self.available() {
-            return Err(Error::Msg("gRPC unavailable".into()));
+            return Err(Error::Msg("The gRPC remote service is unavailable".into()));
         }
 
         let msg = RraftMessage { inner: protobuf::Message::write_to_bytes(msg)? };
