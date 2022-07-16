@@ -69,3 +69,15 @@ impl From<std::string::FromUtf8Error> for Error {
         Self::Other(Box::new(e))
     }
 }
+
+impl From<String> for Error {
+    fn from(e: String) -> Self {
+        Self::Msg(e)
+    }
+}
+
+impl From<&str> for Error {
+    fn from(e: &str) -> Self {
+        Self::Msg(e.to_owned())
+    }
+}
