@@ -17,7 +17,7 @@ pub enum RaftResponse {
     RequestId {
         leader_id: u64,
     },
-    Error,
+    Error(String),
     Response {
         data: Vec<u8>,
     },
