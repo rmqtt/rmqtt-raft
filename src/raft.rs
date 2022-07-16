@@ -136,7 +136,7 @@ impl Mailbox {
                 RaftResponse::WrongLeader { leader_id, leader_addr } => {
                     (leader_id, leader_addr)
                 }
-                RaftResponse::Error => return Err(Error::Unknown),
+                RaftResponse::Error(e) => return Err(Error::from(e)),
                 _ => {
                     warn!("Recv other raft response: {:?}", reply);
                     return Err(Error::Unknown);
@@ -157,6 +157,7 @@ impl Mailbox {
                         warn!("The target node is not the Leader, leader_id: {}, leader_addr: {:?}", leader_id, leader_addr);
                         Err(Error::NotLeader)
                     },
+                    RaftResponse::Error(e) => Err(Error::from(e)),
                     _ => {
                         warn!("Recv other raft response, leader_id: {}, leader_addr: {:?}", leader_id, leader_addr);
                         Err(Error::Unknown)
@@ -181,11 +182,12 @@ impl Mailbox {
         let (tx, rx) = oneshot::channel();
         let mut sender = self.sender.clone();
         match sender.try_send(Message::Query { query, chan: tx }) {
-            Ok(_) => match timeout(Duration::from_secs(5), rx).await { //@TODO configurable
+            Ok(()) => match timeout(Duration::from_secs(5), rx).await { //@TODO configurable
                 Ok(Ok(RaftResponse::Response { data })) => Ok(data),
+                Ok(Ok(RaftResponse::Error(e))) => Err(Error::from(e)),
                 _ => Err(Error::Unknown),
             },
-            _ => Err(Error::Unknown),
+            Err(e) => Err(Error::SendError(e.to_string())),
         }
     }
 
@@ -198,11 +200,12 @@ impl Mailbox {
         let mut sender = self.sender.clone();
         let (chan, rx) = oneshot::channel();
         match sender.send(Message::ConfigChange { change, chan }).await {
-            Ok(_) => match rx.await {
+            Ok(()) => match rx.await {
                 Ok(RaftResponse::Ok) => Ok(()),
+                Ok(RaftResponse::Error(e)) => Err(Error::from(e)),
                 _ => Err(Error::Unknown),
             },
-            _ => Err(Error::Unknown),
+            Err(e) => Err(Error::SendError(e.to_string())),
         }
     }
 
@@ -213,9 +216,10 @@ impl Mailbox {
         match sender.send(Message::Status { chan: tx }).await {
             Ok(_) => match timeout(Duration::from_secs(5), rx).await {  //@TODO configurable
                 Ok(Ok(RaftResponse::Status(status))) => Ok(status),
+                Ok(Ok(RaftResponse::Error(e))) => Err(Error::from(e)),
                 _ => Err(Error::Unknown),
             },
-            _ => Err(Error::Unknown),
+            Err(e) => Err(Error::SendError(e.to_string())),
         }
     }
 }

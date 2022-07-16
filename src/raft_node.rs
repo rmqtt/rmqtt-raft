@@ -94,7 +94,7 @@ impl QuerySender {
                 warn!(
                     "error sending query after, {:?}", e
                 );
-                if let Err(e) = self.chan.send(RaftResponse::Error) {
+                if let Err(e) = self.chan.send(RaftResponse::Error(e.to_string())) {
                     warn!(
                         "send_query, Message::Query, RaftResponse send error: {:?}",
                         e
@@ -129,7 +129,7 @@ impl QuerySender {
                             "error sending query after {} retries: {}",
                             self.max_retries, e
                         );
-                        if let Err(e) = self.chan.send(RaftResponse::Error) {
+                        if let Err(e) = self.chan.send(RaftResponse::Error(e.to_string())) {
                             warn!(
                                 "send_query, Message::Query, RaftResponse send error: {:?}",
                                 e
@@ -625,8 +625,8 @@ impl<S: Store + 'static> RaftNode<S> {
     }
 
     #[inline]
-    fn _send_error(&self, chan: oneshot::Sender<RaftResponse>) {
-        let raft_response = RaftResponse::Error;
+    fn _send_error(&self, chan: oneshot::Sender<RaftResponse>, e: String) {
+        let raft_response = RaftResponse::Error(e);
         if let Err(e) = chan.send(raft_response) {
             warn!("send_error, RaftResponse send error: {:?}", e);
         }
@@ -775,7 +775,7 @@ impl<S: Store + 'static> RaftNode<S> {
             now = Instant::now();
             if elapsed > heartbeat {
                 heartbeat = Duration::from_millis(100);
-                if elapsed > Duration::from_millis(300) {
+                if elapsed > Duration::from_millis(500) {
                     warn!("raft tick elapsed: {:?}", elapsed);
                 }
                 self.tick();
@@ -788,7 +788,7 @@ impl<S: Store + 'static> RaftNode<S> {
                 error!("raft on_ready(..) error: {:?}, elapsed: {:?}", e, on_ready_now.elapsed());
                 return Err(e);
             }
-            if on_ready_now.elapsed() > Duration::from_millis(90) {
+            if on_ready_now.elapsed() > Duration::from_millis(200) {
                 warn!("raft on_ready(..) elapsed: {:?}", on_ready_now.elapsed());
             }
         }
@@ -807,13 +807,13 @@ impl<S: Store + 'static> RaftNode<S> {
         if !ready.entries().is_empty() {
             let entries = ready.entries();
             let store = self.mut_store();
-            store.append(entries).unwrap();
+            store.append(entries)?;
         }
 
         if let Some(hs) = ready.hs() {
             // Raft HardState changed, and we need to persist it.
             let store = self.mut_store();
-            store.set_hard_state(hs).unwrap();
+            store.set_hard_state(hs)?;
         }
 
         //for message in ready.take_messages() {
@@ -955,9 +955,13 @@ impl<S: Store + 'static> RaftNode<S> {
 
         match (deserialize::<Proposals>(entry.get_data())?, self.uncommitteds.remove(&seq)) {
             (Proposals::One(data), chan) => {
-                let reply = self.store.apply(&data).await?;
+                let reply = self.store.apply(&data).await;
                 if let Some(ReplyChan::One((chan, inst))) = chan {
-                    if let Err(_resp) = chan.send(RaftResponse::Response { data: reply }) {
+                    let res = match reply{
+                        Ok(data) => RaftResponse::Response { data },
+                        Err(e) => RaftResponse::Error(e.to_string()),
+                    };
+                    if let Err(_resp) = chan.send(res) {
                         warn!(
                             "[handle_normal] send RaftResponse error, seq:{}, cost time: {:?}", seq, inst.elapsed()
                         );
@@ -971,7 +975,7 @@ impl<S: Store + 'static> RaftNode<S> {
                     None
                 };
                 while let Some(data) = datas.pop() {
-                    let reply = self.store.apply(&data).await?;
+                    let reply = self.store.apply(&data).await;
                     if let Some((chan, inst)) = chans.as_mut().and_then(|cs| cs.pop()) {
                         if inst.elapsed().as_secs() > 3{
                             warn!(
@@ -979,7 +983,11 @@ impl<S: Store + 'static> RaftNode<S> {
                                 inst.elapsed(), chan.is_canceled()
                             );
                         }
-                        if let Err(_resp) = chan.send(RaftResponse::Response { data: reply }) {
+                        let res = match reply{
+                            Ok(data) => RaftResponse::Response { data },
+                            Err(e) => RaftResponse::Error(e.to_string()),
+                        };
+                        if let Err(_resp) = chan.send(res) {
                             warn!(
                                 "[handle_normal] send RaftResponse error, seq:{}, cost time: {:?}", seq, inst.elapsed()
                             );

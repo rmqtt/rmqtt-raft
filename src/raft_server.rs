@@ -103,7 +103,7 @@ impl RaftService for RaftServer {
             }
             Ok(_) => (),
             Err(e) => {
-                reply.inner = serialize(&RaftResponse::Error).unwrap();
+                reply.inner = serialize(&RaftResponse::Error("timeout".into())).expect("serialize error");
                 warn!("timeout waiting for reply, {:?}", e);
             }
         }
@@ -197,17 +197,17 @@ impl RaftService for RaftServer {
                         reply.inner = serialize(&raft_response).expect("serialize error");
                     }
                     Ok(Err(e)) => {
-                        reply.inner = serialize(&RaftResponse::Error).expect("serialize error");
+                        reply.inner = serialize(&RaftResponse::Error(e.to_string())).expect("serialize error");
                         warn!("send query error, {}", e);
                     }
                     Err(_e) => {
-                        reply.inner = serialize(&RaftResponse::Error).unwrap();
+                        reply.inner = serialize(&RaftResponse::Error("timeout".into())).expect("serialize error");
                         warn!("timeout waiting for send query reply");
                     }
                 }
             }
             Err(e) => {
-                reply.inner = serialize(&RaftResponse::Error).unwrap();
+                reply.inner = serialize(&RaftResponse::Error(e.to_string())).expect("serialize error");
                 warn!("send query error, {}", e)
             }
         }
