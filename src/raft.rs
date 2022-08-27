@@ -119,7 +119,7 @@ impl Mailbox {
 
     #[inline]
     async fn _send(&self, message: Vec<u8>) -> Result<Vec<u8>> {
-        let (leader_id, leader_addr) = {
+        let (target_leader_id, target_leader_addr) = {
             let (tx, rx) = oneshot::channel();
             let proposal = Message::Propose {
                 proposal: message.clone(),
@@ -146,20 +146,21 @@ impl Mailbox {
 
         debug!(
             "This node not is Leader, leader_id: {:?}, leader_addr: {:?}",
-            leader_id, leader_addr
+            target_leader_id, target_leader_addr
         );
 
-        if let Some(leader_addr) = leader_addr {
-            if leader_id != 0 {
-                return match self.send_to_leader(message, leader_id, leader_addr.clone()).await?{
+        if let Some(target_leader_addr) = target_leader_addr {
+            if target_leader_id != 0 {
+                return match self.send_to_leader(message, target_leader_id, target_leader_addr.clone()).await?{
                     RaftResponse::Response { data } => Ok(data),
                     RaftResponse::WrongLeader { leader_id, leader_addr } => {
-                        warn!("The target node is not the Leader, leader_id: {}, leader_addr: {:?}", leader_id, leader_addr);
+                        warn!("The target node is not the Leader, target_leader_id: {}, target_leader_addr: {:?}, actual_leader_id: {}, actual_leader_addr: {:?}",
+                            target_leader_id, target_leader_addr, leader_id, leader_addr);
                         Err(Error::NotLeader)
                     },
                     RaftResponse::Error(e) => Err(Error::from(e)),
                     _ => {
-                        warn!("Recv other raft response, leader_id: {}, leader_addr: {:?}", leader_id, leader_addr);
+                        warn!("Recv other raft response, target_leader_id: {}, target_leader_addr: {:?}", target_leader_id, target_leader_addr);
                         Err(Error::Unknown)
                     }
                 }
