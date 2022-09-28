@@ -829,7 +829,7 @@ impl<S: Store + 'static> RaftNode<S> {
                 client,
                 client_id,
                 chan: self.snd.clone(),
-                max_retries: 5,
+                max_retries: 0,
                 timeout: Duration::from_millis(300),
             };
             // if let Err(e) = self.msg_tx.try_send(message_sender) {
