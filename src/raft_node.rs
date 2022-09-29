@@ -829,8 +829,8 @@ impl<S: Store + 'static> RaftNode<S> {
                 client,
                 client_id,
                 chan: self.snd.clone(),
-                max_retries: 0,
-                timeout: Duration::from_millis(300),
+                max_retries: 1,
+                timeout: Duration::from_millis(500),
             };
             // if let Err(e) = self.msg_tx.try_send(message_sender) {
             //     log::warn!("msg_tx.try_send, error: {:?}", e.to_string());
