@@ -143,6 +143,15 @@ async fn status(mailbox: Arc<Mailbox>) -> Result<impl warp::Reply, Infallible> {
 //./target/release/rmqttraft-warp-memstore --id 2 --raft-addr "127.0.0.1:5002" --peer-addr "127.0.0.1:5001" --peer-addr "127.0.0.1:5003" --web-server "0.0.0.0:8082"
 //./target/release/rmqttraft-warp-memstore --id 3 --raft-addr "127.0.0.1:5003" --peer-addr "127.0.0.1:5001" --peer-addr "127.0.0.1:5002" --web-server "0.0.0.0:8083"
 
+//target\debug\rmqttraft-warp-memstore.exe --id 1 --raft-addr "127.0.0.1:5001" --peer-addr "127.0.0.1:5002" --peer-addr "127.0.0.1:5003" --web-server "0.0.0.0:8081"
+//target\debug\rmqttraft-warp-memstore.exe --id 2 --raft-addr "127.0.0.1:5002" --peer-addr "127.0.0.1:5001" --peer-addr "127.0.0.1:5003" --web-server "0.0.0.0:8082"
+//target\debug\rmqttraft-warp-memstore.exe --id 3 --raft-addr "127.0.0.1:5003" --peer-addr "127.0.0.1:5001" --peer-addr "127.0.0.1:5002" --web-server "0.0.0.0:8083"
+
+//./target/debug/rmqttraft-warp-memstore --id 1 --raft-addr "127.0.0.1:5001" --peer-addr "127.0.0.1:5002" --peer-addr "127.0.0.1:5003" --web-server "0.0.0.0:8081" > out_1.log 2>&1 &
+//./target/debug/rmqttraft-warp-memstore --id 2 --raft-addr "127.0.0.1:5002" --peer-addr "127.0.0.1:5001" --peer-addr "127.0.0.1:5003" --web-server "0.0.0.0:8082" > out_2.log 2>&1 &
+//./target/debug/rmqttraft-warp-memstore --id 3 --raft-addr "127.0.0.1:5003" --peer-addr "127.0.0.1:5001" --peer-addr "127.0.0.1:5002" --web-server "0.0.0.0:8083" > out_3.log 2>&1 &
+
+
 // wrk -c 100 -t4 -d60s -H "Connection: keep-alive" "http://127.0.0.1:8081/put/key1/val-1"
 // wrk -c 100 -t4 -d60s -H "Connection: keep-alive" "http://127.0.0.1:8082/put/key1/val-2"
 // wrk -c 100 -t6 -d60s -H "Connection: keep-alive" "http://127.0.0.1:8083/get/key1"
@@ -150,6 +159,10 @@ async fn status(mailbox: Arc<Mailbox>) -> Result<impl warp::Reply, Infallible> {
 // ab -n 5000 -c 20 "http://127.0.0.1:8081/put/key1/val-1"
 // ab -n 5000 -c 50 "http://127.0.0.1:8082/put/key1/val-2"
 // ab -n 5000 -c 20 "http://127.0.0.1:8083/get/key1"
+
+// ab -n 50000 -c 1000 "http://127.0.0.1:8081/put/key1/val-1"
+// ab -n 50000 -c 1000 "http://127.0.0.1:8082/put/key2/val-1"
+// ab -n 50000 -c 1000 "http://127.0.0.1:8083/put/key3/val-1"
 
 #[tokio::main]
 async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
