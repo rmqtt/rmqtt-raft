@@ -128,7 +128,7 @@ impl Mailbox {
             let mut sender = self.sender.clone();
             sender.try_send(proposal)
                 .map_err(|e| Error::SendError(e.to_string()))?;
-            let reply = timeout(Duration::from_secs(3), rx).await; //@TODO configurable
+            let reply = timeout(Duration::from_secs(6), rx).await; //@TODO configurable
             let reply = reply.map_err(|e| Error::RecvError(e.to_string()))?
                 .map_err(|e| Error::RecvError(e.to_string()))?;
             match reply {
@@ -183,7 +183,7 @@ impl Mailbox {
         let (tx, rx) = oneshot::channel();
         let mut sender = self.sender.clone();
         match sender.try_send(Message::Query { query, chan: tx }) {
-            Ok(()) => match timeout(Duration::from_secs(5), rx).await { //@TODO configurable
+            Ok(()) => match timeout(Duration::from_secs(6), rx).await { //@TODO configurable
                 Ok(Ok(RaftResponse::Response { data })) => Ok(data),
                 Ok(Ok(RaftResponse::Error(e))) => Err(Error::from(e)),
                 _ => Err(Error::Unknown),
@@ -215,7 +215,7 @@ impl Mailbox {
         let (tx, rx) = oneshot::channel();
         let mut sender = self.sender.clone();
         match sender.send(Message::Status { chan: tx }).await {
-            Ok(_) => match timeout(Duration::from_secs(5), rx).await {  //@TODO configurable
+            Ok(_) => match timeout(Duration::from_secs(6), rx).await {  //@TODO configurable
                 Ok(Ok(RaftResponse::Status(status))) => Ok(status),
                 Ok(Ok(RaftResponse::Error(e))) => Err(Error::from(e)),
                 _ => Err(Error::Unknown),

@@ -157,7 +157,7 @@ pub struct Peer {
 impl Peer {
     pub fn new(addr: String) -> Peer {
         debug!("connecting to node at {}...", addr);
-        let crw_timeout = Duration::from_secs(5); //@TODO configurable
+        let crw_timeout = Duration::from_secs(6); //@TODO configurable
         let max_concurrency = 200;
         Peer {
             addr,
@@ -726,6 +726,7 @@ impl<S: Store + 'static> RaftNode<S> {
                     }
                 }
                 Ok(Some(Message::Propose { proposal, chan })) => {
+                    let now = Instant::now();
                     if !self.is_leader() {
                         debug!("Message::Propose, send_wrong_leader {:?}", proposal);
                         self.send_wrong_leader(chan);
@@ -733,15 +734,22 @@ impl<S: Store + 'static> RaftNode<S> {
                         merger.add(proposal, chan);
                         self.take_and_propose(&mut merger);
                     }
+                    if now.elapsed() > Duration::from_millis(100) {
+                        info!("Message::Propose elapsed: {:?}", now.elapsed());
+                    }
                 }
 
                 Ok(Some(Message::Query { query, chan })) => {
+                    let now = Instant::now();
                     if !self.is_leader() {
                         debug!("[forward_query] query.len: {:?}", query.len());
                         self.forward_query(query, chan).await;
                     } else {
                         debug!("Message::Query, {:?}", query);
                         self.send_query(&query, chan).await;
+                    }
+                    if now.elapsed() > Duration::from_millis(100) {
+                        info!("Message::Query elapsed: {:?}", now.elapsed());
                     }
                 }
 
@@ -773,7 +781,7 @@ impl<S: Store + 'static> RaftNode<S> {
 
             let elapsed = now.elapsed();
             now = Instant::now();
-            if elapsed > heartbeat {
+            if elapsed >= heartbeat {
                 heartbeat = Duration::from_millis(100);
                 if elapsed > Duration::from_millis(500) {
                     warn!("raft tick elapsed: {:?}", elapsed);
@@ -955,7 +963,11 @@ impl<S: Store + 'static> RaftNode<S> {
 
         match (deserialize::<Proposals>(entry.get_data())?, self.uncommitteds.remove(&seq)) {
             (Proposals::One(data), chan) => {
+                let apply_start = std::time::Instant::now();
                 let reply = self.store.apply(&data).await;
+                if apply_start.elapsed().as_secs() > 3 {
+                    log::warn!("apply, cost time: {:?}", apply_start.elapsed());
+                }
                 if let Some(ReplyChan::One((chan, inst))) = chan {
                     let res = match reply{
                         Ok(data) => RaftResponse::Response { data },
@@ -975,7 +987,11 @@ impl<S: Store + 'static> RaftNode<S> {
                     None
                 };
                 while let Some(data) = datas.pop() {
+                    let apply_start = std::time::Instant::now();
                     let reply = self.store.apply(&data).await;
+                    if apply_start.elapsed().as_secs() > 3 {
+                        log::warn!("apply, cost time: {:?}", apply_start.elapsed());
+                    }
                     if let Some((chan, inst)) = chans.as_mut().and_then(|cs| cs.pop()) {
                         if inst.elapsed().as_secs() > 3{
                             warn!(
