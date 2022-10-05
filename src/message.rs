@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::time::Instant;
+
 use futures::channel::oneshot::Sender;
 use raft::eraftpb::{ConfChange, Message as RaftMessage};
 use serde::{Deserialize, Serialize};
@@ -86,13 +87,11 @@ pub(crate) enum Proposals {
     More(Vec<Vec<u8>>),
 }
 
-
 pub(crate) struct Merger {
     proposals: Vec<Vec<u8>>,
     chans: Vec<(Sender<RaftResponse>, Instant)>,
     start_collection_time: i64,
 }
-
 
 impl Merger {
     pub fn new() -> Self {
@@ -125,7 +124,7 @@ impl Merger {
                     (Some(proposal), Some(chan)) => {
                         Some((Proposals::One(proposal), ReplyChan::One(chan)))
                     }
-                    _ => unreachable!()
+                    _ => unreachable!(),
                 }
             } else {
                 let mut proposals = self.proposals.drain(0..len).collect::<Vec<_>>();
@@ -143,15 +142,16 @@ impl Merger {
 
     #[inline]
     fn timeout(&self) -> bool {
-        chrono::Local::now().timestamp_millis() > (self.start_collection_time + 200)  //@TODO configurable, 200 millisecond
+        chrono::Local::now().timestamp_millis() > (self.start_collection_time + 200)
+        //@TODO configurable, 200 millisecond
     }
 }
 
 #[tokio::test]
 async fn test_merger() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let mut merger = Merger::new();
-    use std::time::Duration;
     use futures::channel::oneshot::channel;
+    use std::time::Duration;
 
     let add = |merger: &mut Merger| {
         let (tx, rx) = channel();
@@ -159,8 +159,8 @@ async fn test_merger() -> std::result::Result<(), Box<dyn std::error::Error>> {
         rx
     };
 
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicI64, Ordering};
+    use std::sync::Arc;
     const MAX: i64 = 111;
     let count = Arc::new(AtomicI64::new(0));
     let mut futs = Vec::new();

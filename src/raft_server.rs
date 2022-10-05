@@ -51,7 +51,8 @@ impl RaftService for RaftServer {
         let (tx, rx) = oneshot::channel();
         let _ = sender.send(Message::RequestId { chan: tx }).await;
         //let response = rx.await;
-        let reply = timeout(Duration::from_secs(6), rx).await  //@TODO configurable
+        let reply = timeout(Duration::from_secs(6), rx)
+            .await //@TODO configurable
             .map_err(|_e| Status::unavailable("recv timeout for reply"))?
             .map_err(|_e| Status::unavailable("recv canceled for reply"))?;
         match reply {
@@ -103,7 +104,8 @@ impl RaftService for RaftServer {
             }
             Ok(_) => (),
             Err(e) => {
-                reply.inner = serialize(&RaftResponse::Error("timeout".into())).expect("serialize error");
+                reply.inner =
+                    serialize(&RaftResponse::Error("timeout".into())).expect("serialize error");
                 warn!("timeout waiting for reply, {:?}", e);
             }
         }
@@ -125,9 +127,7 @@ impl RaftService for RaftServer {
                     inner: serialize(&response).unwrap(),
                 }))
             }
-            Err(_) => {
-                Err(Status::unavailable("error for try send message"))
-            }
+            Err(_) => Err(Status::unavailable("error for try send message")),
         };
         SEND_MESSAGE_ACTIVE_REQUESTS.fetch_sub(1, Ordering::SeqCst);
         reply
@@ -145,20 +145,15 @@ impl RaftService for RaftServer {
 
         let reply = match sender.try_send(message) {
             Ok(()) => {
-                let reply = match timeout(Duration::from_secs(6), rx).await { //@TODO configurable
-                    Ok(Ok(raft_response)) => {
-                        match serialize(&raft_response) {
-                            Ok(resp) => {
-                                Ok(Response::new(raft_service::RaftResponse {
-                                    inner: resp
-                                }))
-                            }
-                            Err(e) => {
-                                warn!("serialize error, {}", e);
-                                Err(Status::unavailable("serialize error"))
-                            }
+                let reply = match timeout(Duration::from_secs(6), rx).await {
+                    //@TODO configurable
+                    Ok(Ok(raft_response)) => match serialize(&raft_response) {
+                        Ok(resp) => Ok(Response::new(raft_service::RaftResponse { inner: resp })),
+                        Err(e) => {
+                            warn!("serialize error, {}", e);
+                            Err(Status::unavailable("serialize error"))
                         }
-                    }
+                    },
                     Ok(Err(e)) => {
                         warn!("recv error for reply, {}", e);
                         Err(Status::unavailable("recv error for reply"))
@@ -197,17 +192,20 @@ impl RaftService for RaftServer {
                         reply.inner = serialize(&raft_response).expect("serialize error");
                     }
                     Ok(Err(e)) => {
-                        reply.inner = serialize(&RaftResponse::Error(e.to_string())).expect("serialize error");
+                        reply.inner = serialize(&RaftResponse::Error(e.to_string()))
+                            .expect("serialize error");
                         warn!("send query error, {}", e);
                     }
                     Err(_e) => {
-                        reply.inner = serialize(&RaftResponse::Error("timeout".into())).expect("serialize error");
+                        reply.inner = serialize(&RaftResponse::Error("timeout".into()))
+                            .expect("serialize error");
                         warn!("timeout waiting for send query reply");
                     }
                 }
             }
             Err(e) => {
-                reply.inner = serialize(&RaftResponse::Error(e.to_string())).expect("serialize error");
+                reply.inner =
+                    serialize(&RaftResponse::Error(e.to_string())).expect("serialize error");
                 warn!("send query error, {}", e)
             }
         }

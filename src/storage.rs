@@ -79,7 +79,6 @@ impl LogStore for MemStorage {
         store.compact(index)?;
         Ok(())
     }
-
 }
 
 impl Storage for MemStorage {

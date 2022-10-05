@@ -91,9 +91,7 @@ impl QuerySender {
         let mut client = match self.client.client().await {
             Ok(c) => c,
             Err(e) => {
-                warn!(
-                    "error sending query after, {:?}", e
-                );
+                warn!("error sending query after, {:?}", e);
                 if let Err(e) = self.chan.send(RaftResponse::Error(e.to_string())) {
                     warn!(
                         "send_query, Message::Query, RaftResponse send error: {:?}",
@@ -231,7 +229,9 @@ impl Peer {
             return Err(Error::Msg("The gRPC remote service is unavailable".into()));
         }
 
-        let msg = RraftMessage { inner: protobuf::Message::write_to_bytes(msg)? };
+        let msg = RraftMessage {
+            inner: protobuf::Message::write_to_bytes(msg)?,
+        };
         self.active_tasks.fetch_add(1, Ordering::SeqCst);
         let reply = self._send_message(msg).await;
         self.active_tasks.fetch_sub(1, Ordering::SeqCst);
@@ -258,9 +258,10 @@ impl Peer {
         }
 
         let result = tokio::time::timeout(
-            Duration::from_secs(15),  //@TODO configurable
+            Duration::from_secs(15), //@TODO configurable
             task(c, msg),
-        ).await;
+        )
+            .await;
         let result = result.map_err(|_| Error::Elapsed)??;
         Ok(result)
     }
@@ -302,20 +303,15 @@ impl Peer {
             Ok(message_reply.inner)
         }
 
-        let result = tokio::time::timeout(
-            self.crw_timeout,
-            task(c, msg),
-        ).await;
+        let result = tokio::time::timeout(self.crw_timeout, task(c, msg)).await;
         let result = result.map_err(|_| Error::Elapsed)??;
         Ok(result)
     }
-
 
     #[inline]
     pub fn _addr(&self) -> &str {
         &self.addr
     }
-
 
     #[inline]
     pub fn record_failure(&self) {
@@ -324,12 +320,10 @@ impl Peer {
             .store(chrono::Local::now().timestamp_millis(), Ordering::SeqCst);
     }
 
-
     #[inline]
     pub fn record_success(&self) {
         self.grpc_fails.store(0, Ordering::SeqCst);
     }
-
 
     #[inline]
     pub fn available(&self) -> bool {
@@ -362,7 +356,7 @@ impl<S: Store + 'static> RaftNode<S> {
         store: S,
         logger: &slog::Logger,
     ) -> Self {
-        let config = Self::new_config(id, 10, 5);  //@TODO configurable
+        let config = Self::new_config(id, 10, 5); //@TODO configurable
 
         config.validate().unwrap();
 
@@ -415,7 +409,7 @@ impl<S: Store + 'static> RaftNode<S> {
         let inner = RawNode::new(&config, storage, logger)?;
         let peers = HashMap::new();
         let seq = AtomicU64::new(0);
-        let last_snap_time = Instant::now() + Duration::from_secs(600);  //@TODO configurable
+        let last_snap_time = Instant::now() + Duration::from_secs(600); //@TODO configurable
         let msg_tx = Self::start_message_sender();
         let uncommitteds = HashMap::new();
         Ok(RaftNode {
@@ -438,7 +432,8 @@ impl<S: Store + 'static> RaftNode<S> {
 
         tokio::spawn(async move {
             use std::sync::atomic::AtomicBool;
-            type Queues = HashMap<u64, (Arc<AtomicBool>, VecDeque<MessageSender>), ahash::RandomState>;
+            type Queues =
+            HashMap<u64, (Arc<AtomicBool>, VecDeque<MessageSender>), ahash::RandomState>;
             let mut queues: Queues = Queues::default();
 
             let sends = |queues: &mut Queues| {
@@ -466,13 +461,15 @@ impl<S: Store + 'static> RaftNode<S> {
             };
 
             loop {
-                match timeout(Duration::from_millis(10), rx.next()).await {  //@TODO configurable
+                match timeout(Duration::from_millis(10), rx.next()).await {
+                    //@TODO configurable
                     Ok(Some(msg)) => {
                         let (_, q) = queues
                             .entry(msg.client_id)
                             .or_insert((Arc::new(AtomicBool::new(false)), VecDeque::new()));
                         q.push_back(msg);
-                        if q.len() > 300 {  //@TODO configurable
+                        if q.len() > 300 {
+                            //@TODO configurable
                             warn!("There is too much backlog of unsent messages, {}", q.len())
                         }
                         sends(&mut queues);
@@ -599,9 +596,7 @@ impl<S: Store + 'static> RaftNode<S> {
     async fn send_query(&self, query: &[u8], chan: oneshot::Sender<RaftResponse>) {
         // tokio::spawn(async move{
         let data = self.store.query(query).await.unwrap_or_default();
-        if let Err(e) = chan.send(RaftResponse::Response {
-            data
-        }) {
+        if let Err(e) = chan.send(RaftResponse::Response { data }) {
             warn!("Message::Query, RaftResponse send error: {:?}", e);
         }
         // });
@@ -662,7 +657,7 @@ impl<S: Store + 'static> RaftNode<S> {
     }
 
     pub async fn run(mut self) -> Result<()> {
-        let mut heartbeat = Duration::from_millis(100);  //@TODO configurable
+        let mut heartbeat = Duration::from_millis(100); //@TODO configurable
         let mut now = Instant::now();
         let mut snapshot_received = self.is_leader();
         let mut merger = Merger::new();
@@ -690,7 +685,8 @@ impl<S: Store + 'static> RaftNode<S> {
                         // leader assign new id to peer
                         info!("received request from: {}", change.get_node_id());
                         let seq = self.seq.fetch_add(1, Ordering::Relaxed);
-                        self.uncommitteds.insert(seq, ReplyChan::One((chan, Instant::now())));
+                        self.uncommitteds
+                            .insert(seq, ReplyChan::One((chan, Instant::now())));
                         if let Err(e) = self.propose_conf_change(serialize(&seq).unwrap(), change) {
                             warn!("propose_conf_change, error: {:?}", e);
                         }
@@ -793,7 +789,11 @@ impl<S: Store + 'static> RaftNode<S> {
 
             let on_ready_now = Instant::now();
             if let Err(e) = self.on_ready().await {
-                error!("raft on_ready(..) error: {:?}, elapsed: {:?}", e, on_ready_now.elapsed());
+                error!(
+                    "raft on_ready(..) error: {:?}, elapsed: {:?}",
+                    e,
+                    on_ready_now.elapsed()
+                );
                 return Err(e);
             }
             if on_ready_now.elapsed() > Duration::from_millis(200) {
@@ -802,9 +802,7 @@ impl<S: Store + 'static> RaftNode<S> {
         }
     }
 
-    async fn on_ready(
-        &mut self,
-    ) -> Result<()> {
+    async fn on_ready(&mut self) -> Result<()> {
         if !self.has_ready() {
             return Ok(());
         }
@@ -882,11 +880,7 @@ impl<S: Store + 'static> RaftNode<S> {
         }
     }
 
-
-    async fn handle_committed_entries(
-        &mut self,
-        committed_entries: Vec<Entry>,
-    ) -> Result<()> {
+    async fn handle_committed_entries(&mut self, committed_entries: Vec<Entry>) -> Result<()> {
         // Fitler out empty entries produced by new elected leaders.
         for entry in committed_entries {
             if entry.data.is_empty() {
@@ -903,10 +897,7 @@ impl<S: Store + 'static> RaftNode<S> {
     }
 
     #[inline]
-    async fn handle_config_change(
-        &mut self,
-        entry: &Entry,
-    ) -> Result<()> {
+    async fn handle_config_change(&mut self, entry: &Entry) -> Result<()> {
         info!("handle_config_change, entry: {:?}", entry);
         let seq: u64 = deserialize(entry.get_context())?;
         let change: ConfChange = protobuf::Message::parse_from_bytes(entry.get_data())?;
@@ -961,17 +952,18 @@ impl<S: Store + 'static> RaftNode<S> {
     }
 
     #[inline]
-    async fn handle_normal(
-        &mut self,
-        entry: &Entry,
-    ) -> Result<()> {
+    async fn handle_normal(&mut self, entry: &Entry) -> Result<()> {
         let seq: u64 = deserialize(entry.get_context())?;
         debug!(
             "[handle_normal] seq:{}, senders.len(): {}",
-            seq, self.uncommitteds.len()
+            seq,
+            self.uncommitteds.len()
         );
 
-        match (deserialize::<Proposals>(entry.get_data())?, self.uncommitteds.remove(&seq)) {
+        match (
+            deserialize::<Proposals>(entry.get_data())?,
+            self.uncommitteds.remove(&seq),
+        ) {
             (Proposals::One(data), chan) => {
                 let apply_start = std::time::Instant::now();
                 let reply = self.store.apply(&data).await;
@@ -979,13 +971,15 @@ impl<S: Store + 'static> RaftNode<S> {
                     log::warn!("apply, cost time: {:?}", apply_start.elapsed());
                 }
                 if let Some(ReplyChan::One((chan, inst))) = chan {
-                    let res = match reply{
+                    let res = match reply {
                         Ok(data) => RaftResponse::Response { data },
                         Err(e) => RaftResponse::Error(e.to_string()),
                     };
                     if let Err(_resp) = chan.send(res) {
                         warn!(
-                            "[handle_normal] send RaftResponse error, seq:{}, cost time: {:?}", seq, inst.elapsed()
+                            "[handle_normal] send RaftResponse error, seq:{}, cost time: {:?}",
+                            seq,
+                            inst.elapsed()
                         );
                     }
                 }
@@ -1003,19 +997,22 @@ impl<S: Store + 'static> RaftNode<S> {
                         log::warn!("apply, cost time: {:?}", apply_start.elapsed());
                     }
                     if let Some((chan, inst)) = chans.as_mut().and_then(|cs| cs.pop()) {
-                        if inst.elapsed().as_secs() > 3{
+                        if inst.elapsed().as_secs() > 3 {
                             warn!(
                                 "[handle_normal] cost time, {:?}, chan is canceled: {}",
-                                inst.elapsed(), chan.is_canceled()
+                                inst.elapsed(),
+                                chan.is_canceled()
                             );
                         }
-                        let res = match reply{
+                        let res = match reply {
                             Ok(data) => RaftResponse::Response { data },
                             Err(e) => RaftResponse::Error(e.to_string()),
                         };
                         if let Err(_resp) = chan.send(res) {
                             warn!(
-                                "[handle_normal] send RaftResponse error, seq:{}, cost time: {:?}", seq, inst.elapsed()
+                                "[handle_normal] send RaftResponse error, seq:{}, cost time: {:?}",
+                                seq,
+                                inst.elapsed()
                             );
                         }
                     }
@@ -1028,7 +1025,8 @@ impl<S: Store + 'static> RaftNode<S> {
             Instant::now(),
             self.last_snap_time
         );
-        if Instant::now() > self.last_snap_time + Duration::from_secs(600) {  //@TODO configurable
+        if Instant::now() > self.last_snap_time + Duration::from_secs(600) {
+            //@TODO configurable
             //@TODO 600secs
             self.last_snap_time = Instant::now();
             let last_applied = self.raft.raft_log.applied;
