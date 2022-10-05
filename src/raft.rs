@@ -382,8 +382,8 @@ impl<S: Store + Send + Sync + 'static> Raft<S> {
         let mut change = ConfChange::default();
         change.set_node_id(node_id);
         change.set_change_type(ConfChangeType::AddNode);
-        // change.set_context(prost::bytes::Bytes::from(serialize(&self.addr)?));
-        change.set_context(serialize(&self.addr)?);
+        change.set_context(prost::bytes::Bytes::from(serialize(&self.addr)?));
+        // change.set_context(serialize(&self.addr)?);
 
         let change = RiteraftConfChange {
             inner: protobuf::Message::write_to_bytes(&change)?,

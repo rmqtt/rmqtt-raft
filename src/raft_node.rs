@@ -802,7 +802,6 @@ impl<S: Store + 'static> RaftNode<S> {
         }
     }
 
-    #[inline]
     async fn on_ready(
         &mut self,
     ) -> Result<()> {
@@ -811,6 +810,21 @@ impl<S: Store + 'static> RaftNode<S> {
         }
 
         let mut ready = self.ready();
+
+        if !ready.messages().is_empty() {
+            // Send out the messages.
+            self.send_messages(ready.take_messages());
+        }
+
+        if *ready.snapshot() != Snapshot::default() {
+            let snapshot = ready.snapshot();
+            self.store.restore(snapshot.get_data()).await?;
+            let store = self.mut_store();
+            store.apply_snapshot(snapshot.clone())?;
+        }
+
+        self.handle_committed_entries(ready.take_committed_entries())
+            .await?;
 
         if !ready.entries().is_empty() {
             let entries = ready.entries();
@@ -824,8 +838,29 @@ impl<S: Store + 'static> RaftNode<S> {
             store.set_hard_state(hs)?;
         }
 
-        //for message in ready.take_messages() {
-        for message in ready.messages.drain(..) {
+        if !ready.persisted_messages().is_empty() {
+            // Send out the persisted messages come from the node.
+            self.send_messages(ready.take_persisted_messages());
+        }
+        let mut light_rd = self.advance(ready);
+
+        if let Some(commit) = light_rd.commit_index() {
+            let store = self.mut_store();
+            store.set_hard_state_comit(commit)?;
+        }
+        // Send out the messages.
+        self.send_messages(light_rd.take_messages());
+        // Apply all committed entries.
+        self.handle_committed_entries(light_rd.take_committed_entries())
+            .await?;
+        self.advance_apply();
+
+        Ok(())
+    }
+
+    fn send_messages(&mut self, msgs: Vec<RaftMessage>) {
+        for message in msgs {
+            // for message in ready.messages.drain(..) {
             let client_id = message.get_to();
             let client = match self.peer(client_id) {
                 Some(peer) => peer,
@@ -845,50 +880,25 @@ impl<S: Store + 'static> RaftNode<S> {
             // }
             tokio::spawn(message_sender.send());
         }
+    }
 
-        if !ready.snapshot().is_empty() {
-            let snapshot = ready.snapshot();
-            self.store.restore(snapshot.get_data()).await?;
-            let store = self.mut_store();
-            store.apply_snapshot(snapshot.clone())?;
-        }
 
-        if let Some(hs) = ready.hs() {
-            // Raft HardState changed, and we need to persist it.
-            let store = self.mut_store();
-            store.set_hard_state(hs)?;
-        }
-
-        if let Some(committed_entries) = ready.committed_entries.take() {
-            // if let Some(committed_entries) = ready.take_committed_entries() {
-            //log::info!("on_ready, committed_entries: {}", committed_entries.len());
-            // let committed_entries_len = committed_entries.len();
-            // let mut _last_apply_index = 0;
-            for entry in committed_entries {
-                //for entry in ready.take_committed_entries() {
-                // Mostly, you need to save the last apply index to resume applying
-                // after restart. Here we just ignore this because we use a Memory storage.
-                // _last_apply_index = entry.get_index();
-                debug!(
-                    "entry.get_entry_type(): {:?}, entry.get_data().is_empty():{}",
-                    entry.get_entry_type(),
-                    entry.get_data().is_empty(),
-                );
-                if entry.get_data().is_empty() {
-                    // Emtpy entry, when the peer becomes Leader it will send an empty entry.
-                    continue;
-                }
-                match entry.get_entry_type() {
-                    EntryType::EntryNormal => self.handle_normal(&entry).await?,
-                    EntryType::EntryConfChange => {
-                        self.handle_config_change(&entry).await?
-                    }
-                    EntryType::EntryConfChangeV2 => unimplemented!(),
-                }
+    async fn handle_committed_entries(
+        &mut self,
+        committed_entries: Vec<Entry>,
+    ) -> Result<()> {
+        // Fitler out empty entries produced by new elected leaders.
+        for entry in committed_entries {
+            if entry.data.is_empty() {
+                // From new elected leaders.
+                continue;
+            }
+            if let EntryType::EntryConfChange = entry.get_entry_type() {
+                self.handle_config_change(&entry).await?;
+            } else {
+                self.handle_normal(&entry).await?;
             }
         }
-
-        self.advance(ready);
         Ok(())
     }
 
@@ -923,12 +933,12 @@ impl<S: Store + 'static> RaftNode<S> {
 
         if let Ok(cs) = self.apply_conf_change(&change) {
             let last_applied = self.raft.raft_log.applied;
-            let snapshot = self.store.snapshot().await?;
+            let snapshot = prost::bytes::Bytes::from(self.store.snapshot().await?);
             {
                 let store = self.mut_store();
                 store.set_conf_state(&cs)?;
                 store.compact(last_applied)?;
-                let _ = store.create_snapshot(snapshot)?;
+                store.create_snapshot(snapshot)?;
             }
         }
 
@@ -1022,7 +1032,7 @@ impl<S: Store + 'static> RaftNode<S> {
             //@TODO 600secs
             self.last_snap_time = Instant::now();
             let last_applied = self.raft.raft_log.applied;
-            let snapshot = self.store.snapshot().await?;
+            let snapshot = prost::bytes::Bytes::from(self.store.snapshot().await?);
             let store = self.mut_store();
             store.compact(last_applied)?;
             let first_index = store.first_index().unwrap_or(0);

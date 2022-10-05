@@ -6,8 +6,9 @@ use crate::error::Result;
 pub trait LogStore: Storage {
     fn append(&mut self, entries: &[Entry]) -> Result<()>;
     fn set_hard_state(&mut self, hard_state: &HardState) -> Result<()>;
+    fn set_hard_state_comit(&mut self, comit: u64) -> Result<()>;
     fn set_conf_state(&mut self, conf_state: &ConfState) -> Result<()>;
-    fn create_snapshot(&mut self, data: Vec<u8>) -> Result<()>;
+    fn create_snapshot(&mut self, data: prost::bytes::Bytes) -> Result<()>;
     fn apply_snapshot(&mut self, snapshot: Snapshot) -> Result<()>;
     fn compact(&mut self, index: u64) -> Result<()>;
 }
@@ -42,6 +43,15 @@ impl LogStore for MemStorage {
     }
 
     #[inline]
+    fn set_hard_state_comit(&mut self, comit: u64) -> Result<()> {
+        let mut store = self.core.wl();
+        let mut hard_state = store.hard_state().clone();
+        hard_state.set_commit(comit);
+        store.set_hardstate(hard_state);
+        Ok(())
+    }
+
+    #[inline]
     fn set_conf_state(&mut self, conf_state: &ConfState) -> Result<()> {
         let mut store = self.core.wl();
         store.set_conf_state(conf_state.clone());
@@ -49,7 +59,7 @@ impl LogStore for MemStorage {
     }
 
     #[inline]
-    fn create_snapshot(&mut self, data: Vec<u8>) -> Result<()> {
+    fn create_snapshot(&mut self, data: prost::bytes::Bytes) -> Result<()> {
         let mut snapshot = self.core.snapshot(0)?;
         snapshot.set_data(data);
         self.snapshot = snapshot;
@@ -69,6 +79,7 @@ impl LogStore for MemStorage {
         store.compact(index)?;
         Ok(())
     }
+
 }
 
 impl Storage for MemStorage {
