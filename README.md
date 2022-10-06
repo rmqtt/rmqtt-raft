@@ -6,6 +6,15 @@ most featureful raft, but instead a convenient interface to get started quickly,
 
 The interface is strongly inspired by the one used by [canonical/raft](https://github.com/canonical/raft).
 
+## Usage
+
+Add this to your `Cargo.toml`:
+
+```toml
+[dependencies]
+rmqtt-raft = "0.2"
+```
+
 ## Getting started
 
 In order to "raft" storage, we need to implement the `Storage` trait for it. Bellow is an example with `HashStore`,
@@ -91,8 +100,10 @@ Only 4 methods need to be implemented for the Store:
 async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     
     let store = HashStore::new();
-
-    let raft = Raft::new(options.raft_addr, store.clone(), logger.clone());
+    let cfg = Config {
+        ..Default::default()
+    };
+    let raft = Raft::new(options.raft_addr, store.clone(), logger.clone(), cfg);
     let leader_info = raft.find_leader_info(options.peer_addrs).await?;
 
     let mailbox = Arc::new(raft.mailbox());
