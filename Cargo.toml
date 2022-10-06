@@ -3,10 +3,13 @@ name = "rmqtt-raft"
 version = "0.2.0"
 authors = ["rmqtt <rmqttd@126.com>"]
 edition = "2018"
-license = "MIT/Apache-2.0"
+license = "MIT OR Apache-2.0"
 repository = "https://github.com/rmqtt-rs/rmqtt-raft"
+homepage = "https://github.com/rmqtt-rs/rmqtt-raft"
 description = "rmqtt-raft - A raft framework, for regular people"
 keywords = ["raft", "distributed-systems"]
+categories = ["algorithms", "distributed", "raft"]
+exclude = ["examples"]
 
 [dependencies]
 futures = "0.3"
