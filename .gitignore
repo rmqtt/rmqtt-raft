@@ -5,3 +5,8 @@ Cargo.lock
 /.idea
 /examples/rmqttraft-warp-memstore/target
 /examples/rmqttraft-warp-memstore/Cargo.lock
+/examples/rmqttraft-warp-memstore/.idea/.gitignore
+/examples/rmqttraft-warp-memstore/.idea/encodings.xml
+/examples/rmqttraft-warp-memstore/.idea/modules.xml
+/examples/rmqttraft-warp-memstore/.idea/rmqttraft-warp-memstore.iml
+/examples/rmqttraft-warp-memstore/.idea/vcs.xml
