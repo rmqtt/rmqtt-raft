@@ -15,7 +15,6 @@ use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::str::FromStr;
 use std::sync::{Arc, RwLock};
-use std::time::Duration;
 use structopt::StructOpt;
 use warp::{Filter, reply};
 
