@@ -5,7 +5,7 @@ extern crate slog_term;
 
 use async_trait::async_trait;
 use bincode::{deserialize, serialize};
-use rmqtt_raft::{Mailbox, Raft, Result as RaftResult, Store};
+use rmqtt_raft::{Mailbox, Raft, Result as RaftResult, Store, Config};
 use serde::{Deserialize, Serialize};
 use slog::Drain;
 use slog::info;
@@ -15,6 +15,7 @@ use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::str::FromStr;
 use std::sync::{Arc, RwLock};
+use std::time::Duration;
 use structopt::StructOpt;
 use warp::{Filter, reply};
 
@@ -177,7 +178,10 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let options = Options::from_args();
     let store = HashStore::new();
     info!(logger, "peer_addrs: {:?}", options.peer_addrs);
-    let raft = Raft::new(options.raft_addr, store.clone(), logger.clone());
+    let cfg = Config {
+        ..Default::default()
+    };
+    let raft = Raft::new(options.raft_addr, store.clone(), logger.clone(), cfg);
     let leader_info = raft.find_leader_info(options.peer_addrs).await?;
     info!(logger, "leader_info: {:?}", leader_info);
 
