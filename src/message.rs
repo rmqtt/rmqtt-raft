@@ -1,9 +1,9 @@
 use std::collections::HashMap;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use futures::channel::oneshot::Sender;
-use raft::eraftpb::{ConfChange, Message as RaftMessage};
 use serde::{Deserialize, Serialize};
+use tikv_raft::eraftpb::{ConfChange, Message as RaftMessage};
 
 #[derive(Serialize, Deserialize, Debug)]
 pub enum RaftResponse {
@@ -91,14 +91,18 @@ pub(crate) struct Merger {
     proposals: Vec<Vec<u8>>,
     chans: Vec<(Sender<RaftResponse>, Instant)>,
     start_collection_time: i64,
+    proposal_batch_size: usize,
+    proposal_batch_timeout: i64,
 }
 
 impl Merger {
-    pub fn new() -> Self {
+    pub fn new(proposal_batch_size: usize, proposal_batch_timeout: Duration) -> Self {
         Self {
             proposals: Vec::new(),
             chans: Vec::new(),
             start_collection_time: 0,
+            proposal_batch_size,
+            proposal_batch_timeout: proposal_batch_timeout.as_millis() as i64,
         }
     }
 
@@ -115,7 +119,7 @@ impl Merger {
 
     #[inline]
     pub fn take(&mut self) -> Option<(Proposals, ReplyChan)> {
-        let max = 50; //@TODO configurable, 50
+        let max = self.proposal_batch_size;
         let len = self.len();
         let len = if len > max { max } else { len };
         if len > 0 && (len == max || self.timeout()) {
@@ -142,14 +146,14 @@ impl Merger {
 
     #[inline]
     fn timeout(&self) -> bool {
-        chrono::Local::now().timestamp_millis() > (self.start_collection_time + 200)
-        //@TODO configurable, 200 millisecond
+        chrono::Local::now().timestamp_millis()
+            > (self.start_collection_time + self.proposal_batch_timeout)
     }
 }
 
 #[tokio::test]
 async fn test_merger() -> std::result::Result<(), Box<dyn std::error::Error>> {
-    let mut merger = Merger::new();
+    let mut merger = Merger::new(50, Duration::from_millis(200));
     use futures::channel::oneshot::channel;
     use std::time::Duration;
 

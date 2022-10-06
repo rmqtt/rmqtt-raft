@@ -1,5 +1,5 @@
-use std::sync::Arc;
 use std::sync::atomic::{AtomicIsize, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -8,7 +8,7 @@ use futures::channel::{mpsc, oneshot};
 use futures::future::FutureExt;
 use futures::SinkExt;
 use log::{debug, info, warn};
-use raft::eraftpb::{ConfChange, ConfChangeType};
+use tikv_raft::eraftpb::{ConfChange, ConfChangeType};
 use tokio::time::timeout;
 use tonic::Request;
 
@@ -16,8 +16,9 @@ use crate::error::{Error, Result};
 use crate::message::{Message, RaftResponse, Status};
 use crate::raft_node::{Peer, RaftNode};
 use crate::raft_server::RaftServer;
-use crate::raft_service::{ConfChange as RiteraftConfChange, Empty, ResultCode};
 use crate::raft_service::raft_service_client::RaftServiceClient;
+use crate::raft_service::{ConfChange as RiteraftConfChange, Empty, ResultCode};
+use crate::Config;
 
 type DashMap<K, V> = dashmap::DashMap<K, V, ahash::RandomState>;
 
@@ -54,6 +55,10 @@ impl ProposalSender {
 pub struct Mailbox {
     peers: Arc<DashMap<(u64, String), Peer>>,
     sender: mpsc::Sender<Message>,
+    grpc_timeout: Duration,
+    grpc_concurrency_limit: usize,
+    grpc_breaker_threshold: u64,
+    grpc_breaker_retry_interval: i64,
 }
 
 lazy_static::lazy_static! {
@@ -85,7 +90,15 @@ impl Mailbox {
     async fn peer(&self, leader_id: u64, leader_addr: String) -> Peer {
         self.peers
             .entry((leader_id, leader_addr.clone()))
-            .or_insert_with(|| Peer::new(leader_addr))
+            .or_insert_with(|| {
+                Peer::new(
+                    leader_addr,
+                    self.grpc_timeout,
+                    self.grpc_concurrency_limit,
+                    self.grpc_breaker_threshold,
+                    self.grpc_breaker_retry_interval,
+                )
+            })
             .clone()
     }
 
@@ -124,7 +137,7 @@ impl Mailbox {
             sender
                 .try_send(proposal)
                 .map_err(|e| Error::SendError(e.to_string()))?;
-            let reply = timeout(Duration::from_secs(6), rx).await; //@TODO configurable
+            let reply = timeout(self.grpc_timeout, rx).await;
             let reply = reply
                 .map_err(|e| Error::RecvError(e.to_string()))?
                 .map_err(|e| Error::RecvError(e.to_string()))?;
@@ -187,8 +200,7 @@ impl Mailbox {
         let (tx, rx) = oneshot::channel();
         let mut sender = self.sender.clone();
         match sender.try_send(Message::Query { query, chan: tx }) {
-            Ok(()) => match timeout(Duration::from_secs(6), rx).await {
-                //@TODO configurable
+            Ok(()) => match timeout(self.grpc_timeout, rx).await {
                 Ok(Ok(RaftResponse::Response { data })) => Ok(data),
                 Ok(Ok(RaftResponse::Error(e))) => Err(Error::from(e)),
                 _ => Err(Error::Unknown),
@@ -220,8 +232,7 @@ impl Mailbox {
         let (tx, rx) = oneshot::channel();
         let mut sender = self.sender.clone();
         match sender.send(Message::Status { chan: tx }).await {
-            Ok(_) => match timeout(Duration::from_secs(6), rx).await {
-                //@TODO configurable
+            Ok(_) => match timeout(self.grpc_timeout, rx).await {
                 Ok(Ok(RaftResponse::Status(status))) => Ok(status),
                 Ok(Ok(RaftResponse::Error(e))) => Err(Error::from(e)),
                 _ => Err(Error::Unknown),
@@ -237,18 +248,21 @@ pub struct Raft<S: Store + 'static> {
     rx: mpsc::Receiver<Message>,
     addr: String,
     logger: slog::Logger,
+    cfg: Arc<Config>,
 }
 
 impl<S: Store + Send + Sync + 'static> Raft<S> {
     /// creates a new node with the given address and store.
-    pub fn new(addr: String, store: S, logger: slog::Logger) -> Self {
+    pub fn new(addr: String, store: S, logger: slog::Logger, cfg: Config) -> Self {
         let (tx, rx) = mpsc::channel(100_000);
+        let cfg = Arc::new(cfg);
         Self {
             store,
             tx,
             rx,
             addr,
             logger,
+            cfg,
         }
     }
 
@@ -257,6 +271,10 @@ impl<S: Store + Send + Sync + 'static> Raft<S> {
         Mailbox {
             peers: Arc::new(DashMap::default()),
             sender: self.tx.clone(),
+            grpc_timeout: self.cfg.grpc_timeout,
+            grpc_concurrency_limit: self.cfg.grpc_concurrency_limit,
+            grpc_breaker_threshold: self.cfg.grpc_breaker_threshold,
+            grpc_breaker_retry_interval: self.cfg.grpc_breaker_retry_interval,
         }
     }
 
@@ -318,10 +336,16 @@ impl<S: Store + Send + Sync + 'static> Raft<S> {
     /// cluster that is initialised that way
     pub async fn lead(self, node_id: u64) -> Result<()> {
         let addr = self.addr.clone();
-        let node =
-            RaftNode::new_leader(self.rx, self.tx.clone(), node_id, self.store, &self.logger);
+        let node = RaftNode::new_leader(
+            self.rx,
+            self.tx.clone(),
+            node_id,
+            self.store,
+            &self.logger,
+            self.cfg.clone(),
+        );
 
-        let server = RaftServer::new(self.tx, addr);
+        let server = RaftServer::new(self.tx, addr, self.cfg.grpc_timeout);
         let _server_handle = tokio::spawn(server.run());
         let node_handle = tokio::spawn(async {
             if let Err(e) = node.run().await {
@@ -357,11 +381,17 @@ impl<S: Store + Send + Sync + 'static> Raft<S> {
 
         // 2. run server and node to prepare for joining
         let addr = self.addr.clone();
-        let mut node =
-            RaftNode::new_follower(self.rx, self.tx.clone(), node_id, self.store, &self.logger)?;
+        let mut node = RaftNode::new_follower(
+            self.rx,
+            self.tx.clone(),
+            node_id,
+            self.store,
+            &self.logger,
+            self.cfg.clone(),
+        )?;
         let peer = node.add_peer(&leader_addr, leader_id);
         let mut client = peer.client().await?;
-        let server = RaftServer::new(self.tx, addr);
+        let server = RaftServer::new(self.tx, addr, self.cfg.grpc_timeout);
         let _server_handle = tokio::spawn(server.run());
         // let node_handle = tokio::spawn(node.run());
 

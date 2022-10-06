@@ -1,5 +1,5 @@
-use raft::prelude::*;
-use raft::storage::MemStorage as CoreMemStorage;
+use tikv_raft::prelude::*;
+use tikv_raft::storage::MemStorage as CoreMemStorage;
 
 use crate::error::Result;
 
@@ -83,7 +83,7 @@ impl LogStore for MemStorage {
 
 impl Storage for MemStorage {
     #[inline]
-    fn initial_state(&self) -> raft::Result<RaftState> {
+    fn initial_state(&self) -> tikv_raft::Result<RaftState> {
         let raft_state = self.core.initial_state()?;
         Ok(raft_state)
     }
@@ -94,28 +94,28 @@ impl Storage for MemStorage {
         low: u64,
         high: u64,
         max_size: impl Into<Option<u64>>,
-    ) -> raft::Result<Vec<Entry>> {
+    ) -> tikv_raft::Result<Vec<Entry>> {
         let entries = self.core.entries(low, high, max_size)?;
         Ok(entries)
     }
 
     #[inline]
-    fn term(&self, idx: u64) -> raft::Result<u64> {
+    fn term(&self, idx: u64) -> tikv_raft::Result<u64> {
         self.core.term(idx)
     }
 
     #[inline]
-    fn first_index(&self) -> raft::Result<u64> {
+    fn first_index(&self) -> tikv_raft::Result<u64> {
         self.core.first_index()
     }
 
     #[inline]
-    fn last_index(&self) -> raft::Result<u64> {
+    fn last_index(&self) -> tikv_raft::Result<u64> {
         self.core.last_index()
     }
 
     #[inline]
-    fn snapshot(&self, _index: u64) -> raft::Result<Snapshot> {
+    fn snapshot(&self, _index: u64) -> tikv_raft::Result<Snapshot> {
         Ok(self.snapshot.clone())
     }
 }

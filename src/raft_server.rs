@@ -1,6 +1,6 @@
 use std::net::{SocketAddr, ToSocketAddrs};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicIsize, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use bincode::serialize;
@@ -8,24 +8,25 @@ use futures::channel::{mpsc, oneshot};
 use futures::SinkExt;
 use log::{info, warn};
 use tokio::time::timeout;
-use tonic::{Request, Response, Status};
 use tonic::transport::Server;
+use tonic::{Request, Response, Status};
 
 use crate::message::{Message, RaftResponse};
+use crate::raft_service::raft_service_server::{RaftService, RaftServiceServer};
 use crate::raft_service::{
     self, ConfChange as RiteraftConfChange, Empty, Message as RiteraftMessage,
 };
-use crate::raft_service::raft_service_server::{RaftService, RaftServiceServer};
 
 pub struct RaftServer {
     snd: mpsc::Sender<Message>,
     addr: SocketAddr,
+    timeout: Duration,
 }
 
 impl RaftServer {
-    pub fn new<A: ToSocketAddrs>(snd: mpsc::Sender<Message>, addr: A) -> Self {
+    pub fn new<A: ToSocketAddrs>(snd: mpsc::Sender<Message>, addr: A, timeout: Duration) -> Self {
         let addr = addr.to_socket_addrs().unwrap().next().unwrap();
-        RaftServer { snd, addr }
+        RaftServer { snd, addr, timeout }
     }
 
     pub async fn run(self) {
@@ -51,8 +52,8 @@ impl RaftService for RaftServer {
         let (tx, rx) = oneshot::channel();
         let _ = sender.send(Message::RequestId { chan: tx }).await;
         //let response = rx.await;
-        let reply = timeout(Duration::from_secs(6), rx)
-            .await //@TODO configurable
+        let reply = timeout(self.timeout, rx)
+            .await
             .map_err(|_e| Status::unavailable("recv timeout for reply"))?
             .map_err(|_e| Status::unavailable("recv canceled for reply"))?;
         match reply {
@@ -80,7 +81,6 @@ impl RaftService for RaftServer {
         &self,
         req: Request<RiteraftConfChange>,
     ) -> Result<Response<raft_service::RaftResponse>, Status> {
-        //let change = req.into_inner();
         let change = protobuf::Message::parse_from_bytes(req.into_inner().inner.as_ref())
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
 
@@ -97,8 +97,7 @@ impl RaftService for RaftServer {
 
         let mut reply = raft_service::RaftResponse::default();
 
-        // if we don't receive a response after 3secs, we timeout
-        match timeout(Duration::from_secs(6), rx).await {
+        match timeout(self.timeout, rx).await {
             Ok(Ok(raft_response)) => {
                 reply.inner = serialize(&raft_response).expect("serialize error");
             }
@@ -145,8 +144,7 @@ impl RaftService for RaftServer {
 
         let reply = match sender.try_send(message) {
             Ok(()) => {
-                let reply = match timeout(Duration::from_secs(6), rx).await {
-                    //@TODO configurable
+                let reply = match timeout(self.timeout, rx).await {
                     Ok(Ok(raft_response)) => match serialize(&raft_response) {
                         Ok(resp) => Ok(Response::new(raft_service::RaftResponse { inner: resp })),
                         Err(e) => {
@@ -187,7 +185,7 @@ impl RaftService for RaftServer {
         match sender.try_send(message) {
             Ok(()) => {
                 // if we don't receive a response after 2secs, we timeout
-                match timeout(Duration::from_secs(6), rx).await {
+                match timeout(self.timeout, rx).await {
                     Ok(Ok(raft_response)) => {
                         reply.inner = serialize(&raft_response).expect("serialize error");
                     }

@@ -1,8 +1,7 @@
 use std::collections::HashMap;
-use std::collections::vec_deque::VecDeque;
 use std::ops::{Deref, DerefMut};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bincode::{deserialize, serialize};
@@ -10,21 +9,22 @@ use futures::channel::{mpsc, oneshot};
 use futures::SinkExt;
 use futures::StreamExt;
 use log::*;
-use raft::{Config, prelude::*, raw_node::RawNode};
-use raft::eraftpb::{ConfChange, ConfChangeType, Entry, EntryType, Message as RaftMessage};
+use tikv_raft::eraftpb::{ConfChange, ConfChangeType, Entry, EntryType, Message as RaftMessage};
+use tikv_raft::{prelude::*, raw_node::RawNode, Config as RaftConfig};
 use tokio::sync::RwLock;
 use tokio::time::timeout;
-use tonic::Request;
 use tonic::transport::{Channel, Endpoint};
+use tonic::Request;
 
 use crate::error::{Error, Result};
 use crate::message::{Merger, Message, Proposals, RaftResponse, ReplyChan, Status};
-use crate::raft::{active_mailbox_querys, active_mailbox_sends};
 use crate::raft::Store;
+use crate::raft::{active_mailbox_querys, active_mailbox_sends};
 use crate::raft_server::{send_message_active_requests, send_proposal_active_requests};
-use crate::raft_service::{Message as RraftMessage, Proposal as RraftProposal, Query};
 use crate::raft_service::raft_service_client::RaftServiceClient;
+use crate::raft_service::{Message as RraftMessage, Proposal as RraftProposal, Query};
 use crate::storage::{LogStore, MemStorage};
+use crate::Config;
 
 pub type RaftGrpcClient = RaftServiceClient<tonic::transport::channel::Channel>;
 
@@ -148,22 +148,30 @@ pub struct Peer {
     grpc_fails: Arc<AtomicU64>,
     grpc_fail_time: Arc<AtomicI64>,
     crw_timeout: Duration,
-    max_concurrency: usize,
+    concurrency_limit: usize,
+    grpc_breaker_threshold: u64,
+    grpc_breaker_retry_interval: i64,
     active_tasks: Arc<AtomicI64>,
 }
 
 impl Peer {
-    pub fn new(addr: String) -> Peer {
+    pub fn new(
+        addr: String,
+        crw_timeout: Duration,
+        concurrency_limit: usize,
+        grpc_breaker_threshold: u64,
+        grpc_breaker_retry_interval: i64,
+    ) -> Peer {
         debug!("connecting to node at {}...", addr);
-        let crw_timeout = Duration::from_secs(6); //@TODO configurable
-        let max_concurrency = 200;
         Peer {
             addr,
             client: Arc::new(RwLock::new(None)),
             grpc_fails: Arc::new(AtomicU64::new(0)),
             grpc_fail_time: Arc::new(AtomicI64::new(0)),
             crw_timeout,
-            max_concurrency,
+            concurrency_limit,
+            grpc_breaker_threshold,
+            grpc_breaker_retry_interval,
             active_tasks: Arc::new(AtomicI64::new(0)),
         }
     }
@@ -183,7 +191,7 @@ impl Peer {
         let endpoint = Channel::from_shared(format!("http://{}", self.addr))
             .map(|endpoint| {
                 endpoint
-                    .concurrency_limit(self.max_concurrency)
+                    .concurrency_limit(self.concurrency_limit)
                     .timeout(self.crw_timeout)
             })
             .map_err(|e| Error::Other(Box::new(e)))?;
@@ -257,11 +265,7 @@ impl Peer {
             Ok(message_reply.inner)
         }
 
-        let result = tokio::time::timeout(
-            Duration::from_secs(15), //@TODO configurable
-            task(c, msg),
-        )
-            .await;
+        let result = tokio::time::timeout(self.crw_timeout, task(c, msg)).await;
         let result = result.map_err(|_| Error::Elapsed)??;
         Ok(result)
     }
@@ -274,10 +278,6 @@ impl Peer {
 
         let msg = RraftProposal { inner: msg };
         let _active_tasks = self.active_tasks.fetch_add(1, Ordering::SeqCst);
-        // if active_tasks > self.max_concurrency as i64 {
-        //     self.active_tasks.fetch_sub(1, Ordering::SeqCst);
-        //     return Err(Error::Msg(format!("gRPC service busy, active tasks is {}", active_tasks)));
-        // }
         let reply = self._send_proposal(msg).await;
         self.active_tasks.fetch_sub(1, Ordering::SeqCst);
         match reply {
@@ -327,10 +327,10 @@ impl Peer {
 
     #[inline]
     pub fn available(&self) -> bool {
-        self.grpc_fails.load(Ordering::SeqCst) < 4  //@TODO configurable
+        self.grpc_fails.load(Ordering::SeqCst) < self.grpc_breaker_threshold
             || (chrono::Local::now().timestamp_millis()
-            - self.grpc_fail_time.load(Ordering::SeqCst))
-            > 3000 //@TODO configurable
+                - self.grpc_fail_time.load(Ordering::SeqCst))
+                > self.grpc_breaker_retry_interval
     }
 }
 
@@ -340,12 +340,13 @@ pub struct RaftNode<S: Store> {
     pub rcv: mpsc::Receiver<Message>,
     pub snd: mpsc::Sender<Message>,
     store: S,
-    #[allow(dead_code)]
-    msg_tx: mpsc::Sender<MessageSender>,
+    // #[allow(dead_code)]
+    // msg_tx: mpsc::Sender<MessageSender>,
     uncommitteds: HashMap<u64, ReplyChan>,
     should_quit: bool,
     seq: AtomicU64,
     last_snap_time: Instant,
+    cfg: Arc<Config>,
 }
 
 impl<S: Store + 'static> RaftNode<S> {
@@ -355,9 +356,9 @@ impl<S: Store + 'static> RaftNode<S> {
         id: u64,
         store: S,
         logger: &slog::Logger,
+        cfg: Arc<Config>,
     ) -> Self {
-        let config = Self::new_config(id, 10, 5); //@TODO configurable
-
+        let config = Self::new_config(id, &cfg.raft_cfg);
         config.validate().unwrap();
 
         let mut s = Snapshot::default();
@@ -373,24 +374,25 @@ impl<S: Store + 'static> RaftNode<S> {
         let mut inner = RawNode::new(&config, storage, logger).unwrap();
         let peers = HashMap::new();
         let seq = AtomicU64::new(0);
-        let last_snap_time = Instant::now() + Duration::from_secs(600); //@TODO configurable
+        let last_snap_time = Instant::now(); // + cfg.snapshot_interval;
 
         inner.raft.become_candidate();
         inner.raft.become_leader();
 
-        let msg_tx = Self::start_message_sender();
+        // let msg_tx = Self::start_message_sender();
         let uncommitteds = HashMap::new();
         RaftNode {
             inner,
             rcv,
             peers,
             store,
-            msg_tx,
+            // msg_tx,
             uncommitteds,
             seq,
             snd,
             should_quit: false,
             last_snap_time,
+            cfg,
         }
     }
 
@@ -400,104 +402,100 @@ impl<S: Store + 'static> RaftNode<S> {
         id: u64,
         store: S,
         logger: &slog::Logger,
+        cfg: Arc<Config>,
     ) -> Result<Self> {
-        let config = Self::new_config(id, 10, 5);
-
+        let config = Self::new_config(id, &cfg.raft_cfg);
         config.validate().unwrap();
 
         let storage = MemStorage::create();
         let inner = RawNode::new(&config, storage, logger)?;
         let peers = HashMap::new();
         let seq = AtomicU64::new(0);
-        let last_snap_time = Instant::now() + Duration::from_secs(600); //@TODO configurable
-        let msg_tx = Self::start_message_sender();
+        let last_snap_time = Instant::now(); // + cfg.snapshot_interval;
+                                             // let msg_tx = Self::start_message_sender();
         let uncommitteds = HashMap::new();
         Ok(RaftNode {
             inner,
             rcv,
             peers,
             store,
-            msg_tx,
+            // msg_tx,
             uncommitteds,
             seq,
             snd,
             should_quit: false,
             last_snap_time,
+            cfg,
         })
     }
 
-    fn start_message_sender() -> mpsc::Sender<MessageSender> {
-        let (tx, mut rx): (mpsc::Sender<MessageSender>, mpsc::Receiver<MessageSender>) =
-            mpsc::channel(1000);
-
-        tokio::spawn(async move {
-            use std::sync::atomic::AtomicBool;
-            type Queues =
-            HashMap<u64, (Arc<AtomicBool>, VecDeque<MessageSender>), ahash::RandomState>;
-            let mut queues: Queues = Queues::default();
-
-            let sends = |queues: &mut Queues| {
-                for (to, (sending, q)) in queues.iter_mut() {
-                    if sending.load(Ordering::SeqCst) {
-                        continue;
-                    }
-                    if !q.is_empty() {
-                        log::debug!(
-                            "to: {}, sending: {}, q.len: {}",
-                            to,
-                            sending.load(Ordering::SeqCst),
-                            q.len()
-                        );
-                    }
-                    if let Some(msg) = q.pop_front() {
-                        let sending = sending.clone();
-                        sending.store(true, Ordering::SeqCst);
-                        tokio::spawn(async move {
-                            msg.send().await;
-                            sending.store(false, Ordering::SeqCst);
-                        });
-                    }
-                }
-            };
-
-            loop {
-                match timeout(Duration::from_millis(10), rx.next()).await {
-                    //@TODO configurable
-                    Ok(Some(msg)) => {
-                        let (_, q) = queues
-                            .entry(msg.client_id)
-                            .or_insert((Arc::new(AtomicBool::new(false)), VecDeque::new()));
-                        q.push_back(msg);
-                        if q.len() > 300 {
-                            //@TODO configurable
-                            warn!("There is too much backlog of unsent messages, {}", q.len())
-                        }
-                        sends(&mut queues);
-                    }
-                    Ok(None) => {
-                        log::error!("start_message_sender, recv None");
-                        break;
-                    }
-                    Err(_) => {
-                        sends(&mut queues);
-                    }
-                }
-            }
-        });
-
-        tx
-    }
+    // fn start_message_sender() -> mpsc::Sender<MessageSender> {
+    //     let (tx, mut rx): (mpsc::Sender<MessageSender>, mpsc::Receiver<MessageSender>) =
+    //         mpsc::channel(1000);
+    //
+    //     tokio::spawn(async move {
+    //         use std::sync::atomic::AtomicBool;
+    //         type Queues =
+    //         HashMap<u64, (Arc<AtomicBool>, VecDeque<MessageSender>), ahash::RandomState>;
+    //         let mut queues: Queues = Queues::default();
+    //
+    //         let sends = |queues: &mut Queues| {
+    //             for (to, (sending, q)) in queues.iter_mut() {
+    //                 if sending.load(Ordering::SeqCst) {
+    //                     continue;
+    //                 }
+    //                 if !q.is_empty() {
+    //                     log::debug!(
+    //                         "to: {}, sending: {}, q.len: {}",
+    //                         to,
+    //                         sending.load(Ordering::SeqCst),
+    //                         q.len()
+    //                     );
+    //                 }
+    //                 if let Some(msg) = q.pop_front() {
+    //                     let sending = sending.clone();
+    //                     sending.store(true, Ordering::SeqCst);
+    //                     tokio::spawn(async move {
+    //                         msg.send().await;
+    //                         sending.store(false, Ordering::SeqCst);
+    //                     });
+    //                 }
+    //             }
+    //         };
+    //
+    //         loop {
+    //             match timeout(Duration::from_millis(10), rx.next()).await {
+    //                 //@TODO configurable
+    //                 Ok(Some(msg)) => {
+    //                     let (_, q) = queues
+    //                         .entry(msg.client_id)
+    //                         .or_insert((Arc::new(AtomicBool::new(false)), VecDeque::new()));
+    //                     q.push_back(msg);
+    //                     if q.len() > 300 {
+    //                         //@TODO configurable
+    //                         warn!("There is too much backlog of unsent messages, {}", q.len())
+    //                     }
+    //                     sends(&mut queues);
+    //                 }
+    //                 Ok(None) => {
+    //                     log::error!("start_message_sender, recv None");
+    //                     break;
+    //                 }
+    //                 Err(_) => {
+    //                     sends(&mut queues);
+    //                 }
+    //             }
+    //         }
+    //     });
+    //
+    //     tx
+    // }
 
     #[inline]
-    fn new_config(id: u64, election_tick: usize, heartbeat_tick: usize) -> Config {
-        Config {
-            id,
-            election_tick,
-            heartbeat_tick,
-            check_quorum: true,
-            pre_vote: true,
-            ..Default::default()
-        }
+    fn new_config(id: u64, cfg: &RaftConfig) -> RaftConfig {
+        let mut cfg = cfg.clone();
+        cfg.id = id;
+        cfg
     }
 
     #[inline]
@@ -520,7 +518,13 @@ impl<S: Store + 'static> RaftNode<S> {
 
     #[inline]
     pub fn add_peer(&mut self, addr: &str, id: u64) -> Peer {
-        let peer = Peer::new(addr.to_string());
+        let peer = Peer::new(
+            addr.to_string(),
+            self.cfg.grpc_timeout,
+            self.cfg.grpc_concurrency_limit,
+            self.cfg.grpc_breaker_threshold,
+            self.cfg.grpc_breaker_retry_interval,
+        );
         self.peers.insert(id, Some(peer.clone()));
         peer
     }
@@ -594,12 +598,10 @@ impl<S: Store + 'static> RaftNode<S> {
 
     #[inline]
     async fn send_query(&self, query: &[u8], chan: oneshot::Sender<RaftResponse>) {
-        // tokio::spawn(async move{
         let data = self.store.query(query).await.unwrap_or_default();
         if let Err(e) = chan.send(RaftResponse::Response { data }) {
             warn!("Message::Query, RaftResponse send error: {:?}", e);
         }
-        // });
     }
 
     #[inline]
@@ -657,10 +659,13 @@ impl<S: Store + 'static> RaftNode<S> {
     }
 
     pub async fn run(mut self) -> Result<()> {
-        let mut heartbeat = Duration::from_millis(100); //@TODO configurable
+        let mut heartbeat = self.cfg.heartbeat;
         let mut now = Instant::now();
         let mut snapshot_received = self.is_leader();
-        let mut merger = Merger::new();
+        let mut merger = Merger::new(
+            self.cfg.proposal_batch_size,
+            self.cfg.proposal_batch_timeout,
+        );
         info!("snapshot_received: {:?}", snapshot_received);
         info!("has_leader: {:?}", self.has_leader());
 
@@ -730,7 +735,7 @@ impl<S: Store + 'static> RaftNode<S> {
                         merger.add(proposal, chan);
                         self.take_and_propose(&mut merger);
                     }
-                    if now.elapsed() > Duration::from_millis(100) {
+                    if now.elapsed() > self.cfg.heartbeat {
                         info!("Message::Propose elapsed: {:?}", now.elapsed());
                     }
                 }
@@ -744,7 +749,7 @@ impl<S: Store + 'static> RaftNode<S> {
                         debug!("Message::Query, {:?}", query);
                         self.send_query(&query, chan).await;
                     }
-                    if now.elapsed() > Duration::from_millis(100) {
+                    if now.elapsed() > self.cfg.heartbeat {
                         info!("Message::Query elapsed: {:?}", now.elapsed());
                     }
                 }
@@ -768,7 +773,6 @@ impl<S: Store + 'static> RaftNode<S> {
                 Ok(None) => {
                     error!("Recv None");
                     return Err(Error::RecvError("Recv None".into()));
-                    //unreachable!()
                 }
                 Err(_) => {
                     self.take_and_propose(&mut merger);
@@ -778,7 +782,7 @@ impl<S: Store + 'static> RaftNode<S> {
             let elapsed = now.elapsed();
             now = Instant::now();
             if elapsed >= heartbeat {
-                heartbeat = Duration::from_millis(100);
+                heartbeat = self.cfg.heartbeat;
                 if elapsed > Duration::from_millis(500) {
                     warn!("raft tick elapsed: {:?}", elapsed);
                 }
@@ -1020,14 +1024,7 @@ impl<S: Store + 'static> RaftNode<S> {
             }
         }
 
-        debug!(
-            "creating snapshot, now: {:?}, last_snap_time: {:?}",
-            Instant::now(),
-            self.last_snap_time
-        );
-        if Instant::now() > self.last_snap_time + Duration::from_secs(600) {
-            //@TODO configurable
-            //@TODO 600secs
+        if Instant::now() > self.last_snap_time + self.cfg.snapshot_interval {
             self.last_snap_time = Instant::now();
             let last_applied = self.raft.raft_log.applied;
             let snapshot = prost::bytes::Bytes::from(self.store.snapshot().await?);
