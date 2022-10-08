@@ -9,7 +9,7 @@ homepage = "https://github.com/rmqtt-rs/rmqtt-raft"
 description = "rmqtt-raft - A raft framework, for regular people"
 keywords = ["raft", "distributed-systems"]
 categories = ["algorithms"]
-exclude = ["examples"]
+exclude = ["examples", ".gitignore", ".cargo/config"]
 
 [dependencies]
 futures = "0.3"

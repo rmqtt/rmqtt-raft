@@ -3,6 +3,7 @@ Cargo.lock
 /target
 /.git
 /.idea
+/.cargo
 /examples/rmqttraft-warp-memstore/target
 /examples/rmqttraft-warp-memstore/Cargo.lock
 /examples/rmqttraft-warp-memstore/.idea/.gitignore
