@@ -429,68 +429,6 @@ impl<S: Store + 'static> RaftNode<S> {
         })
     }
 
-    // fn start_message_sender() -> mpsc::Sender<MessageSender> {
-    //     let (tx, mut rx): (mpsc::Sender<MessageSender>, mpsc::Receiver<MessageSender>) =
-    //         mpsc::channel(1000);
-    //
-    //     tokio::spawn(async move {
-    //         use std::sync::atomic::AtomicBool;
-    //         type Queues =
-    //         HashMap<u64, (Arc<AtomicBool>, VecDeque<MessageSender>), ahash::RandomState>;
-    //         let mut queues: Queues = Queues::default();
-    //
-    //         let sends = |queues: &mut Queues| {
-    //             for (to, (sending, q)) in queues.iter_mut() {
-    //                 if sending.load(Ordering::SeqCst) {
-    //                     continue;
-    //                 }
-    //                 if !q.is_empty() {
-    //                     log::debug!(
-    //                         "to: {}, sending: {}, q.len: {}",
-    //                         to,
-    //                         sending.load(Ordering::SeqCst),
-    //                         q.len()
-    //                     );
-    //                 }
-    //                 if let Some(msg) = q.pop_front() {
-    //                     let sending = sending.clone();
-    //                     sending.store(true, Ordering::SeqCst);
-    //                     tokio::spawn(async move {
-    //                         msg.send().await;
-    //                         sending.store(false, Ordering::SeqCst);
-    //                     });
-    //                 }
-    //             }
-    //         };
-    //
-    //         loop {
-    //             match timeout(Duration::from_millis(10), rx.next()).await {
-    //                 //@TODO configurable
-    //                 Ok(Some(msg)) => {
-    //                     let (_, q) = queues
-    //                         .entry(msg.client_id)
-    //                         .or_insert((Arc::new(AtomicBool::new(false)), VecDeque::new()));
-    //                     q.push_back(msg);
-    //                     if q.len() > 300 {
-    //                         //@TODO configurable
-    //                         warn!("There is too much backlog of unsent messages, {}", q.len())
-    //                     }
-    //                     sends(&mut queues);
-    //                 }
-    //                 Ok(None) => {
-    //                     log::error!("start_message_sender, recv None");
-    //                     break;
-    //                 }
-    //                 Err(_) => {
-    //                     sends(&mut queues);
-    //                 }
-    //             }
-    //         }
-    //     });
-    //
-    //     tx
-    // }
-
     #[inline]
     fn new_config(id: u64, cfg: &RaftConfig) -> RaftConfig {
         let mut cfg = cfg.clone();
@@ -523,7 +461,7 @@ impl<S: Store + 'static> RaftNode<S> {
             self.cfg.grpc_timeout,
             self.cfg.grpc_concurrency_limit,
             self.cfg.grpc_breaker_threshold,
-            self.cfg.grpc_breaker_retry_interval,
+            self.cfg.grpc_breaker_retry_interval.as_millis() as i64,
         );
         self.peers.insert(id, Some(peer.clone()));
         peer

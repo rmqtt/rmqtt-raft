@@ -50,7 +50,7 @@ impl ProposalSender {
     }
 }
 
-/// A mailbox to send messages to a ruung raft node.
+/// A mailbox to send messages to a running raft node.
 #[derive(Clone)]
 pub struct Mailbox {
     peers: Arc<DashMap<(u64, String), Peer>>,
@@ -274,7 +274,7 @@ impl<S: Store + Send + Sync + 'static> Raft<S> {
             grpc_timeout: self.cfg.grpc_timeout,
             grpc_concurrency_limit: self.cfg.grpc_concurrency_limit,
             grpc_breaker_threshold: self.cfg.grpc_breaker_threshold,
-            grpc_breaker_retry_interval: self.cfg.grpc_breaker_retry_interval,
+            grpc_breaker_retry_interval: self.cfg.grpc_breaker_retry_interval.as_millis() as i64,
         }
     }
 
