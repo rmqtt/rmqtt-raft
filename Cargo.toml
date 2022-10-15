@@ -1,11 +1,11 @@
 [package]
 name = "rmqtt-raft"
-version = "0.2.1"
+version = "0.2.2"
 authors = ["rmqtt <rmqttd@126.com>"]
 edition = "2018"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/rmqtt-rs/rmqtt-raft"
-homepage = "https://github.com/rmqtt-rs/rmqtt-raft"
+repository = "https://github.com/rmqtt/rmqtt-raft"
+homepage = "https://github.com/rmqtt/rmqtt-raft"
 description = "rmqtt-raft - A raft framework, for regular people"
 keywords = ["raft", "distributed-systems"]
 categories = ["algorithms"]
