@@ -1,5 +1,9 @@
 # RmqttRaft - A raft framework, for regular people
 
+<a href="https://github.com/rmqtt/rmqtt-raft/releases"><img alt="GitHub Release" src="https://img.shields.io/github/release/rmqtt/rmqtt-raft?color=brightgreen" /></a>
+<a href="https://crates.io/crates/rmqtt-raft"><img alt="crates.io" src="https://img.shields.io/crates/v/rmqtt-raft" /></a>
+<a href="https://docs.rs/rmqtt-raft"><img alt="Documentation" src="https://docs.rs/rmqtt-raft/badge.svg" /></a>
+
 This is an attempt to create a layer on top of
 [tikv/raft-rs](https://github.com/tikv/raft-rs), that is easier to use and implement. This is not supposed to be the
 most featureful raft, but instead a convenient interface to get started quickly, and have a working raft in no time.
