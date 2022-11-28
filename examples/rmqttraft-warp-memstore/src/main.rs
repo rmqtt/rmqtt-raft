@@ -23,7 +23,7 @@ struct Options {
     #[structopt(long)]
     id: u64,
     #[structopt(long)]
-    raft_addr: String,
+    raft_laddr: String,
     #[structopt(name = "peer-addr", long)]
     peer_addrs: Vec<String>,
     #[structopt(long)]
@@ -180,7 +180,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let cfg = Config {
         ..Default::default()
     };
-    let raft = Raft::new(options.raft_addr, store.clone(), logger.clone(), cfg);
+    let raft = Raft::new(options.raft_laddr, store.clone(), logger.clone(), cfg);
     let leader_info = raft.find_leader_info(options.peer_addrs).await?;
     info!(logger, "leader_info: {:?}", leader_info);
 
