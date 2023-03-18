@@ -1,5 +1,6 @@
 use tikv_raft::prelude::*;
 use tikv_raft::storage::MemStorage as CoreMemStorage;
+use tikv_raft::GetEntriesContext;
 
 use crate::error::Result;
 
@@ -60,7 +61,7 @@ impl LogStore for MemStorage {
 
     #[inline]
     fn create_snapshot(&mut self, data: prost::bytes::Bytes) -> Result<()> {
-        let mut snapshot = self.core.snapshot(0)?;
+        let mut snapshot = self.core.snapshot(0, 0)?;
         snapshot.set_data(data);
         self.snapshot = snapshot;
         Ok(())
@@ -94,8 +95,9 @@ impl Storage for MemStorage {
         low: u64,
         high: u64,
         max_size: impl Into<Option<u64>>,
+        context: GetEntriesContext
     ) -> tikv_raft::Result<Vec<Entry>> {
-        let entries = self.core.entries(low, high, max_size)?;
+        let entries = self.core.entries(low, high, max_size, context)?;
         Ok(entries)
     }
 
@@ -115,7 +117,7 @@ impl Storage for MemStorage {
     }
 
     #[inline]
-    fn snapshot(&self, _index: u64) -> tikv_raft::Result<Snapshot> {
+    fn snapshot(&self, _request_index: u64, _to: u64) -> tikv_raft::Result<Snapshot> {
         Ok(self.snapshot.clone())
     }
 }
