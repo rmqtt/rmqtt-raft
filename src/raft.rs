@@ -343,9 +343,9 @@ impl<S: Store + Send + Sync + 'static> Raft<S> {
             self.store,
             &self.logger,
             self.cfg.clone(),
-        );
+        )?;
 
-        let server = RaftServer::new(self.tx, addr, self.cfg.grpc_timeout);
+        let server = RaftServer::new(self.tx, addr, self.cfg.grpc_timeout)?;
         let _server_handle = tokio::spawn(server.run());
         let node_handle = tokio::spawn(async {
             if let Err(e) = node.run().await {
@@ -391,7 +391,7 @@ impl<S: Store + Send + Sync + 'static> Raft<S> {
         )?;
         let peer = node.add_peer(&leader_addr, leader_id);
         let mut client = peer.client().await?;
-        let server = RaftServer::new(self.tx, addr, self.cfg.grpc_timeout);
+        let server = RaftServer::new(self.tx, addr, self.cfg.grpc_timeout)?;
         let _server_handle = tokio::spawn(server.run());
         // let node_handle = tokio::spawn(node.run());
 

@@ -357,9 +357,9 @@ impl<S: Store + 'static> RaftNode<S> {
         store: S,
         logger: &slog::Logger,
         cfg: Arc<Config>,
-    ) -> Self {
+    ) -> Result<Self> {
         let config = Self::new_config(id, &cfg.raft_cfg);
-        config.validate().unwrap();
+        config.validate()?;
 
         let mut s = Snapshot::default();
         // Because we don't use the same configuration to initialize every node, so we use
@@ -370,8 +370,8 @@ impl<S: Store + 'static> RaftNode<S> {
         s.mut_metadata().mut_conf_state().voters = vec![id];
 
         let mut storage: MemStorage = MemStorage::create();
-        storage.apply_snapshot(s).unwrap();
-        let mut inner = RawNode::new(&config, storage, logger).unwrap();
+        storage.apply_snapshot(s)?;
+        let mut inner = RawNode::new(&config, storage, logger)?;
         let peers = HashMap::new();
         let seq = AtomicU64::new(0);
         let last_snap_time = Instant::now(); // + cfg.snapshot_interval;
@@ -381,7 +381,7 @@ impl<S: Store + 'static> RaftNode<S> {
 
         // let msg_tx = Self::start_message_sender();
         let uncommitteds = HashMap::new();
-        RaftNode {
+        let node = RaftNode {
             inner,
             rcv,
             peers,
@@ -393,7 +393,8 @@ impl<S: Store + 'static> RaftNode<S> {
             should_quit: false,
             last_snap_time,
             cfg,
-        }
+        };
+        Ok(node)
     }
 
     pub fn new_follower(
@@ -405,7 +406,7 @@ impl<S: Store + 'static> RaftNode<S> {
         cfg: Arc<Config>,
     ) -> Result<Self> {
         let config = Self::new_config(id, &cfg.raft_cfg);
-        config.validate().unwrap();
+        config.validate()?;
 
         let storage = MemStorage::create();
         let inner = RawNode::new(&config, storage, logger)?;

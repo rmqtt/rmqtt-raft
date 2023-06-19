@@ -11,6 +11,7 @@ use tokio::time::timeout;
 use tonic::transport::Server;
 use tonic::{Request, Response, Status};
 
+use crate::error; //::{Error, Result};
 use crate::message::{Message, RaftResponse};
 use crate::raft_service::raft_service_server::{RaftService, RaftServiceServer};
 use crate::raft_service::{
@@ -24,9 +25,9 @@ pub struct RaftServer {
 }
 
 impl RaftServer {
-    pub fn new<A: ToSocketAddrs>(snd: mpsc::Sender<Message>, addr: A, timeout: Duration) -> Self {
-        let addr = addr.to_socket_addrs().unwrap().next().unwrap();
-        RaftServer { snd, addr, timeout }
+    pub fn new<A: ToSocketAddrs>(snd: mpsc::Sender<Message>, addr: A, timeout: Duration) -> error::Result<Self> {
+        let addr = addr.to_socket_addrs()?.next().ok_or(error::Error::from("None"))?;
+        Ok(RaftServer { snd, addr, timeout })
     }
 
     pub async fn run(self) {
