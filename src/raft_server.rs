@@ -1,4 +1,4 @@
-use std::net::{SocketAddr, ToSocketAddrs};
+use std::net::SocketAddr;
 use std::sync::atomic::{AtomicIsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -11,7 +11,7 @@ use tokio::time::timeout;
 use tonic::transport::Server;
 use tonic::{Request, Response, Status};
 
-use crate::error; //::{Error, Result};
+use crate::error;
 use crate::message::{Message, RaftResponse};
 use crate::raft_service::raft_service_server::{RaftService, RaftServiceServer};
 use crate::raft_service::{
@@ -25,21 +25,20 @@ pub struct RaftServer {
 }
 
 impl RaftServer {
-    pub fn new<A: ToSocketAddrs>(snd: mpsc::Sender<Message>, addr: A, timeout: Duration) -> error::Result<Self> {
-        let addr = addr.to_socket_addrs()?.next().ok_or(error::Error::from("None"))?;
-        Ok(RaftServer { snd, addr, timeout })
+    pub fn new(snd: mpsc::Sender<Message>, addr: SocketAddr, timeout: Duration) -> Self {
+        RaftServer { snd, addr, timeout }
     }
 
-    pub async fn run(self) {
+    pub async fn run(self) -> error::Result<()> {
         let addr = self.addr;
         info!("listening gRPC requests on: {}", addr);
         let svc = RaftServiceServer::new(self);
         Server::builder()
             .add_service(svc)
             .serve(addr)
-            .await
-            .expect("error running server");
-        warn!("server has quit");
+            .await?;
+        info!("server has quit");
+        Ok(())
     }
 }
 

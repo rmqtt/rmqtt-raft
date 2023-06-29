@@ -1,3 +1,4 @@
+use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::atomic::{AtomicIsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -246,24 +247,25 @@ pub struct Raft<S: Store + 'static> {
     store: S,
     tx: mpsc::Sender<Message>,
     rx: mpsc::Receiver<Message>,
-    addr: String,
+    addr: SocketAddr,
     logger: slog::Logger,
     cfg: Arc<Config>,
 }
 
 impl<S: Store + Send + Sync + 'static> Raft<S> {
     /// creates a new node with the given address and store.
-    pub fn new(addr: String, store: S, logger: slog::Logger, cfg: Config) -> Self {
+    pub fn new<A: ToSocketAddrs>(addr: A, store: S, logger: slog::Logger, cfg: Config) -> Result<Self> {
+        let addr = addr.to_socket_addrs()?.next().ok_or(Error::from("None"))?;
         let (tx, rx) = mpsc::channel(100_000);
         let cfg = Arc::new(cfg);
-        Self {
+        Ok(Self {
             store,
             tx,
             rx,
             addr,
             logger,
             cfg,
-        }
+        })
     }
 
     /// gets the node's `Mailbox`.
@@ -335,7 +337,6 @@ impl<S: Store + Send + Sync + 'static> Raft<S> {
     /// Create a new leader for the cluster, with id 1. There has to be exactly one node in the
     /// cluster that is initialised that way
     pub async fn lead(self, node_id: u64) -> Result<()> {
-        let addr = self.addr.clone();
         let node = RaftNode::new_leader(
             self.rx,
             self.tx.clone(),
@@ -345,18 +346,26 @@ impl<S: Store + Send + Sync + 'static> Raft<S> {
             self.cfg.clone(),
         )?;
 
-        let server = RaftServer::new(self.tx, addr, self.cfg.grpc_timeout)?;
-        let _server_handle = tokio::spawn(server.run());
-        let node_handle = tokio::spawn(async {
+        let server = RaftServer::new(self.tx, self.addr, self.cfg.grpc_timeout);
+        let server_handle = async {
+            if let Err(e) = server.run().await {
+                warn!("raft server run error: {:?}", e);
+                Err(e)
+            } else {
+                Ok(())
+            }
+        };
+        let node_handle = async {
             if let Err(e) = node.run().await {
                 warn!("node run error: {:?}", e);
                 Err(e)
             } else {
                 Ok(())
             }
-        });
-        let e = tokio::try_join!(node_handle);
-        warn!("leaving leader node, {:?}", e);
+        };
+
+        tokio::try_join!(server_handle, node_handle)?;
+        info!("leaving leader node");
 
         Ok(())
     }
@@ -380,7 +389,6 @@ impl<S: Store + Send + Sync + 'static> Raft<S> {
         };
 
         // 2. run server and node to prepare for joining
-        let addr = self.addr.clone();
         let mut node = RaftNode::new_follower(
             self.rx,
             self.tx.clone(),
@@ -391,9 +399,15 @@ impl<S: Store + Send + Sync + 'static> Raft<S> {
         )?;
         let peer = node.add_peer(&leader_addr, leader_id);
         let mut client = peer.client().await?;
-        let server = RaftServer::new(self.tx, addr, self.cfg.grpc_timeout)?;
-        let _server_handle = tokio::spawn(server.run());
-        // let node_handle = tokio::spawn(node.run());
+        let server = RaftServer::new(self.tx, self.addr, self.cfg.grpc_timeout);
+        let server_handle = async {
+            if let Err(e) = server.run().await {
+                warn!("raft server run error: {:?}", e);
+                Err(e)
+            } else {
+                Ok(())
+            }
+        };
 
         //try remove from the cluster
         let mut change_remove = ConfChange::default();
@@ -418,7 +432,7 @@ impl<S: Store + Send + Sync + 'static> Raft<S> {
         let mut change = ConfChange::default();
         change.set_node_id(node_id);
         change.set_change_type(ConfChangeType::AddNode);
-        change.set_context(prost::bytes::Bytes::from(serialize(&self.addr)?));
+        change.set_context(prost::bytes::Bytes::from(serialize(&self.addr.to_string())?));
         // change.set_context(serialize(&self.addr)?);
 
         let change = RiteraftConfChange {
@@ -433,8 +447,7 @@ impl<S: Store + Send + Sync + 'static> Raft<S> {
             peer_addrs,
         } = deserialize(&raft_response.inner)?
         {
-            info!("change_config response.assigned_id: {:?}", assigned_id);
-            info!("change_config response.peer_addrs: {:?}", peer_addrs);
+            info!("change_config response.assigned_id: {:?}, peer_addrs: {:?}", assigned_id, peer_addrs);
             for (id, addr) in peer_addrs {
                 if id != assigned_id {
                     node.add_peer(&addr, id);
@@ -444,9 +457,16 @@ impl<S: Store + Send + Sync + 'static> Raft<S> {
             return Err(Error::JoinError);
         }
 
-        let node_handle = tokio::spawn(node.run());
-        let _ = tokio::try_join!(node_handle);
-
+        let node_handle = async {
+            if let Err(e) = node.run().await {
+                warn!("node run error: {:?}", e);
+                Err(e)
+            } else {
+                Ok(())
+            }
+        };
+        let _ = tokio::try_join!(server_handle, node_handle)?;
+        info!("leaving follower node");
         Ok(())
     }
 }
