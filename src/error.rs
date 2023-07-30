@@ -32,6 +32,8 @@ pub enum Error {
     SendError(String),
     #[error("recv error, {0}")]
     RecvError(String),
+    #[error("{0}")]
+    Anyhow(anyhow::Error),
 }
 
 impl Error {
@@ -79,5 +81,18 @@ impl From<String> for Error {
 impl From<&str> for Error {
     fn from(e: &str) -> Self {
         Self::Msg(e.to_owned())
+    }
+}
+
+impl From<anyhow::Error> for Error {
+    #[inline]
+    fn from(e: anyhow::Error) -> Self {
+        Error::Anyhow(e)
+    }
+}
+impl From<tokio::time::error::Elapsed> for Error {
+    #[inline]
+    fn from(_: tokio::time::error::Elapsed) -> Self {
+        Error::Elapsed
     }
 }
