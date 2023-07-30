@@ -107,7 +107,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let cfg = Config {
         ..Default::default()
     };
-    let raft = Raft::new(options.raft_addr, store.clone(), logger.clone(), cfg);
+    let raft = Raft::new(options.raft_laddr, store.clone(), logger.clone(), cfg)?;
     let leader_info = raft.find_leader_info(options.peer_addrs).await?;
 
     let mailbox = Arc::new(raft.mailbox());
@@ -124,7 +124,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    tokio::try_join!(raft_handle)?;
+    tokio::try_join!(raft_handle)?.0?;
     Ok(())
 }
 
