@@ -1,8 +1,8 @@
 use std::time::Duration;
 
 pub use crate::error::{Error, Result};
-pub use crate::raft::{Mailbox, Raft, Store};
 pub use crate::message::Status;
+pub use crate::raft::{Mailbox, Raft, Store};
 pub use tikv_raft::ReadOnlyOption;
 
 mod error;

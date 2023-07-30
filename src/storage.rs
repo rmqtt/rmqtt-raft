@@ -95,7 +95,7 @@ impl Storage for MemStorage {
         low: u64,
         high: u64,
         max_size: impl Into<Option<u64>>,
-        context: GetEntriesContext
+        context: GetEntriesContext,
     ) -> tikv_raft::Result<Vec<Entry>> {
         let entries = self.core.entries(low, high, max_size, context)?;
         Ok(entries)

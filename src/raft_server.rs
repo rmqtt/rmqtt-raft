@@ -33,10 +33,7 @@ impl RaftServer {
         let addr = self.addr;
         info!("listening gRPC requests on: {}", addr);
         let svc = RaftServiceServer::new(self);
-        Server::builder()
-            .add_service(svc)
-            .serve(addr)
-            .await?;
+        Server::builder().add_service(svc).serve(addr).await?;
         info!("server has quit");
         Ok(())
     }
@@ -143,26 +140,23 @@ impl RaftService for RaftServer {
         let message = Message::Propose { proposal, chan: tx };
 
         let reply = match sender.try_send(message) {
-            Ok(()) => {
-                let reply = match timeout(self.timeout, rx).await {
-                    Ok(Ok(raft_response)) => match serialize(&raft_response) {
-                        Ok(resp) => Ok(Response::new(raft_service::RaftResponse { inner: resp })),
-                        Err(e) => {
-                            warn!("serialize error, {}", e);
-                            Err(Status::unavailable("serialize error"))
-                        }
-                    },
-                    Ok(Err(e)) => {
-                        warn!("recv error for reply, {}", e);
-                        Err(Status::unavailable("recv error for reply"))
-                    }
+            Ok(()) => match timeout(self.timeout, rx).await {
+                Ok(Ok(raft_response)) => match serialize(&raft_response) {
+                    Ok(resp) => Ok(Response::new(raft_service::RaftResponse { inner: resp })),
                     Err(e) => {
-                        warn!("timeout waiting for reply, {}", e);
-                        Err(Status::unavailable("timeout waiting for reply"))
+                        warn!("serialize error, {}", e);
+                        Err(Status::unavailable("serialize error"))
                     }
-                };
-                reply
-            }
+                },
+                Ok(Err(e)) => {
+                    warn!("recv error for reply, {}", e);
+                    Err(Status::unavailable("recv error for reply"))
+                }
+                Err(e) => {
+                    warn!("timeout waiting for reply, {}", e);
+                    Err(Status::unavailable("timeout waiting for reply"))
+                }
+            },
             Err(e) => {
                 warn!("error for try send message, {}", e);
                 Err(Status::unavailable("error for try send message"))

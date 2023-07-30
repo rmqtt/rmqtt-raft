@@ -17,8 +17,8 @@ use crate::error::{Error, Result};
 use crate::message::{Message, RaftResponse, Status};
 use crate::raft_node::{Peer, RaftNode};
 use crate::raft_server::RaftServer;
-use crate::raft_service::{ConfChange as RiteraftConfChange, Empty, ResultCode};
 use crate::raft_service::connect;
+use crate::raft_service::{ConfChange as RiteraftConfChange, Empty, ResultCode};
 use crate::Config;
 
 type DashMap<K, V> = dashmap::DashMap<K, V, ahash::RandomState>;
@@ -254,8 +254,16 @@ pub struct Raft<S: Store + 'static> {
 
 impl<S: Store + Send + Sync + 'static> Raft<S> {
     /// creates a new node with the given address and store.
-    pub fn new<A: ToSocketAddrs>(addr: A, store: S, logger: slog::Logger, cfg: Config) -> Result<Self> {
-        let addr = addr.to_socket_addrs()?.next().ok_or(Error::from("None"))?;
+    pub fn new<A: ToSocketAddrs>(
+        addr: A,
+        store: S,
+        logger: slog::Logger,
+        cfg: Config,
+    ) -> Result<Self> {
+        let addr = addr
+            .to_socket_addrs()?
+            .next()
+            .ok_or_else(|| Error::from("None"))?;
         let (tx, rx) = mpsc::channel(100_000);
         let cfg = Arc::new(cfg);
         Ok(Self {
@@ -432,7 +440,9 @@ impl<S: Store + Send + Sync + 'static> Raft<S> {
         let mut change = ConfChange::default();
         change.set_node_id(node_id);
         change.set_change_type(ConfChangeType::AddNode);
-        change.set_context(prost::bytes::Bytes::from(serialize(&self.addr.to_string())?));
+        change.set_context(prost::bytes::Bytes::from(serialize(
+            &self.addr.to_string(),
+        )?));
         // change.set_context(serialize(&self.addr)?);
 
         let change = RiteraftConfChange {
@@ -447,7 +457,10 @@ impl<S: Store + Send + Sync + 'static> Raft<S> {
             peer_addrs,
         } = deserialize(&raft_response.inner)?
         {
-            info!("change_config response.assigned_id: {:?}, peer_addrs: {:?}", assigned_id, peer_addrs);
+            info!(
+                "change_config response.assigned_id: {:?}, peer_addrs: {:?}",
+                assigned_id, peer_addrs
+            );
             for (id, addr) in peer_addrs {
                 if id != assigned_id {
                     node.add_peer(&addr, id);
