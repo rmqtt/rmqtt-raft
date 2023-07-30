@@ -16,7 +16,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-rmqtt-raft = "0.2"
+rmqtt-raft = "0.3"
 ```
 
 ## Getting started
