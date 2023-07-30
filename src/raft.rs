@@ -17,8 +17,8 @@ use crate::error::{Error, Result};
 use crate::message::{Message, RaftResponse, Status};
 use crate::raft_node::{Peer, RaftNode};
 use crate::raft_server::RaftServer;
-use crate::raft_service::raft_service_client::RaftServiceClient;
 use crate::raft_service::{ConfChange as RiteraftConfChange, Empty, ResultCode};
+use crate::raft_service::connect;
 use crate::Config;
 
 type DashMap<K, V> = dashmap::DashMap<K, V, ahash::RandomState>;
@@ -313,7 +313,7 @@ impl<S: Store + Send + Sync + 'static> Raft<S> {
 
     async fn request_leader(&self, peer_addr: String) -> Result<Option<(u64, String)>> {
         let (leader_id, leader_addr): (u64, String) = {
-            let mut client = RaftServiceClient::connect(format!("http://{}", peer_addr)).await?;
+            let mut client = connect(&peer_addr, 1, self.cfg.grpc_timeout).await?;
             let response = client
                 .request_id(Request::new(Empty::default()))
                 .await?

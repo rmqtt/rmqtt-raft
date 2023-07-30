@@ -13,7 +13,6 @@ use tikv_raft::eraftpb::{ConfChange, ConfChangeType, Entry, EntryType, Message a
 use tikv_raft::{prelude::*, raw_node::RawNode, Config as RaftConfig};
 use tokio::sync::RwLock;
 use tokio::time::timeout;
-use tonic::transport::{Channel, Endpoint};
 use tonic::Request;
 
 use crate::error::{Error, Result};
@@ -22,7 +21,7 @@ use crate::raft::Store;
 use crate::raft::{active_mailbox_querys, active_mailbox_sends};
 use crate::raft_server::{send_message_active_requests, send_proposal_active_requests};
 use crate::raft_service::raft_service_client::RaftServiceClient;
-use crate::raft_service::{Message as RraftMessage, Proposal as RraftProposal, Query};
+use crate::raft_service::{connect, Message as RraftMessage, Proposal as RraftProposal, Query};
 use crate::storage::{LogStore, MemStorage};
 use crate::Config;
 
@@ -187,28 +186,6 @@ impl Peer {
     }
 
     #[inline]
-    fn _endpoint(&self) -> Result<Endpoint> {
-        let endpoint = Channel::from_shared(format!("http://{}", self.addr))
-            .map(|endpoint| {
-                endpoint
-                    .concurrency_limit(self.concurrency_limit)
-                    .timeout(self.crw_timeout)
-            })
-            .map_err(|e| Error::Other(Box::new(e)))?;
-        Ok(endpoint)
-    }
-
-    #[inline]
-    async fn _connect(endpoint: &Endpoint, crw_timeout: Duration) -> Result<RaftGrpcClient> {
-        let channel = tokio::time::timeout(crw_timeout, endpoint.connect())
-            .await
-            .map_err(|e| Error::Other(Box::new(e)))?
-            .map_err(|e| Error::Other(Box::new(e)))?;
-        let client = RaftServiceClient::new(channel);
-        Ok(client)
-    }
-
-    #[inline]
     async fn connect(&self) -> Result<RaftGrpcClient> {
         if let Some(c) = self.client.read().await.as_ref() {
             return Ok(c.clone());
@@ -219,8 +196,7 @@ impl Peer {
             return Ok(c.clone());
         }
 
-        let endpoint = self._endpoint()?;
-        let c = Self::_connect(&endpoint, self.crw_timeout).await?;
+        let c = connect(&self.addr, self.concurrency_limit, self.crw_timeout).await?;
         client.replace(c.clone());
         Ok(c)
     }
