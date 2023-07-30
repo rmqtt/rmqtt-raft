@@ -1,6 +1,6 @@
 [package]
 name = "rmqtt-raft"
-version = "0.3.0"
+version = "0.3.1"
 authors = ["rmqtt <rmqttd@126.com>"]
 edition = "2018"
 license = "MIT OR Apache-2.0"
@@ -28,6 +28,7 @@ dashmap = "5.4"
 ahash = "0.8"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 lazy_static = "1.4"
+anyhow = "1.0"
 
 [build-dependencies]
 tonic-build = "0.8"
