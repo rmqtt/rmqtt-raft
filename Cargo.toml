@@ -11,6 +11,9 @@ keywords = ["raft", "distributed-systems"]
 categories = ["algorithms"]
 exclude = ["examples", ".gitignore", ".cargo/config"]
 
+[package.metadata.docs.rs]
+all-features = true
+
 [features]
 default = []
 reuse = ["reuseport", "reuseaddr"]
