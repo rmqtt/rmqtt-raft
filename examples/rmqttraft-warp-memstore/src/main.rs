@@ -178,6 +178,8 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let store = HashStore::new();
     info!(logger, "peer_addrs: {:?}", options.peer_addrs);
     let cfg = Config {
+        reuseaddr: true,
+        reuseport: true,
         ..Default::default()
     };
     let raft = Raft::new(options.raft_laddr, store.clone(), logger.clone(), cfg)?;
