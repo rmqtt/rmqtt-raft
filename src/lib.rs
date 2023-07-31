@@ -15,6 +15,15 @@ mod storage;
 
 #[derive(Clone)]
 pub struct Config {
+    #[cfg(all(
+        feature = "reuseaddr",
+    ))]
+    pub reuseaddr: bool,
+    #[cfg(all(
+        feature = "reuseport",
+        not(any(target_os = "solaris", target_os = "illumos"))
+    ))]
+    pub reuseport: bool,
     pub grpc_timeout: Duration,
     pub grpc_concurrency_limit: usize,
     //GRPC failed to fuse threshold
@@ -32,6 +41,15 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            #[cfg(all(
+                feature = "reuseaddr",
+            ))]
+            reuseaddr: false,
+            #[cfg(all(
+                feature = "reuseport",
+                not(any(target_os = "solaris", target_os = "illumos"))
+            ))]
+            reuseport: false,
             grpc_timeout: Duration::from_secs(6),
             grpc_concurrency_limit: 200,
             grpc_breaker_threshold: 4,

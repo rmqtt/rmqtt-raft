@@ -354,7 +354,7 @@ impl<S: Store + Send + Sync + 'static> Raft<S> {
             self.cfg.clone(),
         )?;
 
-        let server = RaftServer::new(self.tx, self.addr, self.cfg.grpc_timeout);
+        let server = RaftServer::new(self.tx, self.addr, self.cfg.clone());
         let server_handle = async {
             if let Err(e) = server.run().await {
                 warn!("raft server run error: {:?}", e);
@@ -407,7 +407,7 @@ impl<S: Store + Send + Sync + 'static> Raft<S> {
         )?;
         let peer = node.add_peer(&leader_addr, leader_id);
         let mut client = peer.client().await?;
-        let server = RaftServer::new(self.tx, self.addr, self.cfg.grpc_timeout);
+        let server = RaftServer::new(self.tx, self.addr, self.cfg.clone());
         let server_handle = async {
             if let Err(e) = server.run().await {
                 warn!("raft server run error: {:?}", e);

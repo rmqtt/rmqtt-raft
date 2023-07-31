@@ -11,7 +11,7 @@ use tokio::time::timeout;
 use tonic::transport::Server;
 use tonic::{Request, Response, Status};
 
-use crate::error;
+use crate::{Config, error};
 use crate::message::{Message, RaftResponse};
 use crate::raft_service::raft_service_server::{RaftService, RaftServiceServer};
 use crate::raft_service::{
@@ -20,20 +20,33 @@ use crate::raft_service::{
 
 pub struct RaftServer {
     snd: mpsc::Sender<Message>,
-    addr: SocketAddr,
+    laddr: SocketAddr,
     timeout: Duration,
+    cfg: Arc<Config>,
 }
 
 impl RaftServer {
-    pub fn new(snd: mpsc::Sender<Message>, addr: SocketAddr, timeout: Duration) -> Self {
-        RaftServer { snd, addr, timeout }
+    pub fn new(snd: mpsc::Sender<Message>, laddr: SocketAddr, cfg: Arc<Config>) -> Self {
+        RaftServer { snd, laddr, timeout: cfg.grpc_timeout, cfg }
     }
 
     pub async fn run(self) -> error::Result<()> {
-        let addr = self.addr;
-        info!("listening gRPC requests on: {}", addr);
+        let laddr = self.laddr;
+        let _cfg = self.cfg.clone();
+        info!("listening gRPC requests on: {}", laddr);
         let svc = RaftServiceServer::new(self);
-        Server::builder().add_service(svc).serve(addr).await?;
+        let server = Server::builder().add_service(svc);
+
+        #[cfg(any(feature = "reuseport", feature = "reuseaddr"))]
+        #[cfg(all(feature = "socket2", feature = "tokio-stream"))]
+        {
+            log::info!("reuseaddr: {}, reuseport: {}", _cfg.reuseaddr, _cfg.reuseport);
+            let listener = raft_service::bind(laddr, 1024, _cfg.reuseaddr, _cfg.reuseport)?;
+            server.serve_with_incoming(listener).await?;
+        }
+        #[cfg(not(any(feature = "reuseport", feature = "reuseaddr")))]
+        server.serve(laddr).await?;
+
         info!("server has quit");
         Ok(())
     }
