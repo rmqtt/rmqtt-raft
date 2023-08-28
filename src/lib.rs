@@ -15,9 +15,7 @@ mod storage;
 
 #[derive(Clone)]
 pub struct Config {
-    #[cfg(all(
-        feature = "reuseaddr",
-    ))]
+    #[cfg(feature = "reuseaddr")]
     pub reuseaddr: bool,
     #[cfg(all(
         feature = "reuseport",
@@ -41,9 +39,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            #[cfg(all(
-                feature = "reuseaddr",
-            ))]
+            #[cfg(feature = "reuseaddr")]
             reuseaddr: false,
             #[cfg(all(
                 feature = "reuseport",
