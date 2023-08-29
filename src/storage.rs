@@ -62,7 +62,7 @@ impl LogStore for MemStorage {
     #[inline]
     fn create_snapshot(&mut self, data: prost::bytes::Bytes) -> Result<()> {
         let mut snapshot = self.core.snapshot(0, 0)?;
-        snapshot.set_data(data);
+        snapshot.set_data(data.to_vec());
         self.snapshot = snapshot;
         Ok(())
     }

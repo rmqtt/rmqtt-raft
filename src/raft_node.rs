@@ -9,6 +9,7 @@ use futures::channel::{mpsc, oneshot};
 use futures::SinkExt;
 use futures::StreamExt;
 use log::*;
+use prost::Message as _;
 use tikv_raft::eraftpb::{ConfChange, ConfChangeType, Entry, EntryType, Message as RaftMessage};
 use tikv_raft::{prelude::*, raw_node::RawNode, Config as RaftConfig};
 use tokio::sync::RwLock;
@@ -214,7 +215,7 @@ impl Peer {
         }
 
         let msg = RraftMessage {
-            inner: protobuf::Message::write_to_bytes(msg)?,
+            inner: RaftMessage::encode_to_vec(msg),
         };
         self.active_tasks.fetch_add(1, Ordering::SeqCst);
         let reply = self._send_message(msg).await;
@@ -819,7 +820,8 @@ impl<S: Store + 'static> RaftNode<S> {
     async fn handle_config_change(&mut self, entry: &Entry) -> Result<()> {
         info!("handle_config_change, entry: {:?}", entry);
         let seq: u64 = deserialize(entry.get_context())?;
-        let change: ConfChange = protobuf::Message::parse_from_bytes(entry.get_data())?;
+        let change = ConfChange::decode(entry.get_data())
+            .map_err(|e| tonic::Status::invalid_argument(e.to_string()))?;
         let id = change.get_node_id();
 
         let change_type = change.get_change_type();
