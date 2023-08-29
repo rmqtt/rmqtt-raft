@@ -7,16 +7,19 @@ use bincode::serialize;
 use futures::channel::{mpsc, oneshot};
 use futures::SinkExt;
 use log::{info, warn};
+use once_cell::sync::Lazy;
+use prost::Message as _;
+use tikv_raft::eraftpb::{ConfChange, Message as RaftMessage};
 use tokio::time::timeout;
 use tonic::transport::Server;
 use tonic::{Request, Response, Status};
 
-use crate::{Config, error};
 use crate::message::{Message, RaftResponse};
 use crate::raft_service::raft_service_server::{RaftService, RaftServiceServer};
 use crate::raft_service::{
     self, ConfChange as RiteraftConfChange, Empty, Message as RiteraftMessage,
 };
+use crate::{error, Config};
 
 pub struct RaftServer {
     snd: mpsc::Sender<Message>,
@@ -27,7 +30,12 @@ pub struct RaftServer {
 
 impl RaftServer {
     pub fn new(snd: mpsc::Sender<Message>, laddr: SocketAddr, cfg: Arc<Config>) -> Self {
-        RaftServer { snd, laddr, timeout: cfg.grpc_timeout, cfg }
+        RaftServer {
+            snd,
+            laddr,
+            timeout: cfg.grpc_timeout,
+            cfg,
+        }
     }
 
     pub async fn run(self) -> error::Result<()> {
@@ -40,7 +48,11 @@ impl RaftServer {
         #[cfg(any(feature = "reuseport", feature = "reuseaddr"))]
         #[cfg(all(feature = "socket2", feature = "tokio-stream"))]
         {
-            log::info!("reuseaddr: {}, reuseport: {}", _cfg.reuseaddr, _cfg.reuseport);
+            log::info!(
+                "reuseaddr: {}, reuseport: {}",
+                _cfg.reuseaddr,
+                _cfg.reuseport
+            );
             let listener = raft_service::bind(laddr, 1024, _cfg.reuseaddr, _cfg.reuseport)?;
             server.serve_with_incoming(listener).await?;
         }
@@ -91,7 +103,7 @@ impl RaftService for RaftServer {
         &self,
         req: Request<RiteraftConfChange>,
     ) -> Result<Response<raft_service::RaftResponse>, Status> {
-        let change = protobuf::Message::parse_from_bytes(req.into_inner().inner.as_ref())
+        let change = ConfChange::decode(req.into_inner().inner.as_ref())
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
 
         let mut sender = self.snd.clone();
@@ -126,7 +138,7 @@ impl RaftService for RaftServer {
         &self,
         request: Request<RiteraftMessage>,
     ) -> Result<Response<raft_service::RaftResponse>, Status> {
-        let message = protobuf::Message::parse_from_bytes(request.into_inner().inner.as_ref())
+        let message = RaftMessage::decode(request.into_inner().inner.as_ref())
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
         SEND_MESSAGE_ACTIVE_REQUESTS.fetch_add(1, Ordering::SeqCst);
         let reply = match self.snd.clone().try_send(Message::Raft(Box::new(message))) {
@@ -219,10 +231,11 @@ impl RaftService for RaftServer {
     }
 }
 
-lazy_static::lazy_static! {
-    static ref SEND_PROPOSAL_ACTIVE_REQUESTS: Arc<AtomicIsize> = Arc::new(AtomicIsize::new(0));
-    static ref SEND_MESSAGE_ACTIVE_REQUESTS: Arc<AtomicIsize> = Arc::new(AtomicIsize::new(0));
-}
+static SEND_PROPOSAL_ACTIVE_REQUESTS: Lazy<Arc<AtomicIsize>> =
+    Lazy::new(|| Arc::new(AtomicIsize::new(0)));
+
+static SEND_MESSAGE_ACTIVE_REQUESTS: Lazy<Arc<AtomicIsize>> =
+    Lazy::new(|| Arc::new(AtomicIsize::new(0)));
 
 pub fn send_proposal_active_requests() -> isize {
     SEND_PROPOSAL_ACTIVE_REQUESTS.load(Ordering::SeqCst)

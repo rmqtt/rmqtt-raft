@@ -9,6 +9,8 @@ use futures::channel::{mpsc, oneshot};
 use futures::future::FutureExt;
 use futures::SinkExt;
 use log::{debug, info, warn};
+use once_cell::sync::Lazy;
+use prost::Message as _;
 use tikv_raft::eraftpb::{ConfChange, ConfChangeType};
 use tokio::time::timeout;
 use tonic::Request;
@@ -62,10 +64,8 @@ pub struct Mailbox {
     grpc_breaker_retry_interval: i64,
 }
 
-lazy_static::lazy_static! {
-    static ref MAILBOX_SENDS: Arc<AtomicIsize> = Arc::new(AtomicIsize::new(0));
-    static ref MAILBOX_QUERYS: Arc<AtomicIsize> = Arc::new(AtomicIsize::new(0));
-}
+static MAILBOX_SENDS: Lazy<Arc<AtomicIsize>> = Lazy::new(|| Arc::new(AtomicIsize::new(0)));
+static MAILBOX_QUERYS: Lazy<Arc<AtomicIsize>> = Lazy::new(|| Arc::new(AtomicIsize::new(0)));
 
 pub fn active_mailbox_sends() -> isize {
     MAILBOX_SENDS.load(Ordering::SeqCst)
@@ -422,7 +422,7 @@ impl<S: Store + Send + Sync + 'static> Raft<S> {
         change_remove.set_node_id(node_id);
         change_remove.set_change_type(ConfChangeType::RemoveNode);
         let change_remove = RiteraftConfChange {
-            inner: protobuf::Message::write_to_bytes(&change_remove)?,
+            inner: ConfChange::encode_to_vec(&change_remove),
         };
 
         let raft_response = client
@@ -440,13 +440,11 @@ impl<S: Store + Send + Sync + 'static> Raft<S> {
         let mut change = ConfChange::default();
         change.set_node_id(node_id);
         change.set_change_type(ConfChangeType::AddNode);
-        change.set_context(prost::bytes::Bytes::from(serialize(
-            &self.addr.to_string(),
-        )?));
+        change.set_context(serialize(&self.addr.to_string())?);
         // change.set_context(serialize(&self.addr)?);
 
         let change = RiteraftConfChange {
-            inner: protobuf::Message::write_to_bytes(&change)?,
+            inner: ConfChange::encode_to_vec(&change),
         };
         let raft_response = client
             .change_config(Request::new(change))
