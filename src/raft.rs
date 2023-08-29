@@ -10,6 +10,7 @@ use futures::future::FutureExt;
 use futures::SinkExt;
 use log::{debug, info, warn};
 use once_cell::sync::Lazy;
+use prost::Message as _;
 use tikv_raft::eraftpb::{ConfChange, ConfChangeType};
 use tokio::time::timeout;
 use tonic::Request;
@@ -421,7 +422,7 @@ impl<S: Store + Send + Sync + 'static> Raft<S> {
         change_remove.set_node_id(node_id);
         change_remove.set_change_type(ConfChangeType::RemoveNode);
         let change_remove = RiteraftConfChange {
-            inner: protobuf::Message::write_to_bytes(&change_remove)?,
+            inner: ConfChange::encode_to_vec(&change_remove),
         };
 
         let raft_response = client
@@ -443,7 +444,7 @@ impl<S: Store + Send + Sync + 'static> Raft<S> {
         // change.set_context(serialize(&self.addr)?);
 
         let change = RiteraftConfChange {
-            inner: protobuf::Message::write_to_bytes(&change)?,
+            inner: ConfChange::encode_to_vec(&change),
         };
         let raft_response = client
             .change_config(Request::new(change))

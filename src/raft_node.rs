@@ -215,7 +215,7 @@ impl Peer {
         }
 
         let msg = RraftMessage {
-            inner: protobuf::Message::write_to_bytes(msg)?,
+            inner: RaftMessage::encode_to_vec(msg),
         };
         self.active_tasks.fetch_add(1, Ordering::SeqCst);
         let reply = self._send_message(msg).await;
