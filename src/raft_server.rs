@@ -8,6 +8,8 @@ use futures::channel::{mpsc, oneshot};
 use futures::SinkExt;
 use log::{info, warn};
 use once_cell::sync::Lazy;
+use prost::Message as _;
+use tikv_raft::eraftpb::{ConfChange, Message as RaftMessage};
 use tokio::time::timeout;
 use tonic::transport::Server;
 use tonic::{Request, Response, Status};
@@ -101,7 +103,7 @@ impl RaftService for RaftServer {
         &self,
         req: Request<RiteraftConfChange>,
     ) -> Result<Response<raft_service::RaftResponse>, Status> {
-        let change = protobuf::Message::parse_from_bytes(req.into_inner().inner.as_ref())
+        let change = ConfChange::decode(req.into_inner().inner.as_ref())
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
 
         let mut sender = self.snd.clone();
@@ -136,7 +138,7 @@ impl RaftService for RaftServer {
         &self,
         request: Request<RiteraftMessage>,
     ) -> Result<Response<raft_service::RaftResponse>, Status> {
-        let message = protobuf::Message::parse_from_bytes(request.into_inner().inner.as_ref())
+        let message = RaftMessage::decode(request.into_inner().inner.as_ref())
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
         SEND_MESSAGE_ACTIVE_REQUESTS.fetch_add(1, Ordering::SeqCst);
         let reply = match self.snd.clone().try_send(Message::Raft(Box::new(message))) {
