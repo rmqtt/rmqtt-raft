@@ -22,8 +22,6 @@ pub enum Error {
     LeaderNotExist,
     #[error("Not a Leader")]
     NotLeader,
-    #[error("protobuf error: `{0}`")]
-    ProtobufError(#[from] protobuf::ProtobufError),
     #[error("timeout")]
     Elapsed,
     #[error("{0}")]
