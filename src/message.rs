@@ -57,6 +57,8 @@ pub struct Status {
     pub id: u64,
     pub leader_id: u64,
     pub uncommitteds: usize,
+    pub merger_proposals: usize,
+    pub sending_raft_messages: isize,
     pub active_mailbox_sends: isize,
     pub active_mailbox_querys: isize,
     pub active_send_proposal_grpc_requests: isize,

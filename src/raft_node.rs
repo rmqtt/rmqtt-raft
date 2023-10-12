@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::ops::{Deref, DerefMut};
-use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicIsize, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -35,6 +35,7 @@ struct MessageSender {
     chan: mpsc::Sender<Message>,
     max_retries: usize,
     timeout: Duration,
+    sending_raft_messages: Arc<AtomicIsize>,
 }
 
 impl MessageSender {
@@ -45,6 +46,7 @@ impl MessageSender {
         loop {
             match self.client.send_message(&self.message).await {
                 Ok(_) => {
+                    self.sending_raft_messages.fetch_sub(1, Ordering::SeqCst);
                     return;
                 }
                 Err(e) => {
@@ -68,6 +70,7 @@ impl MessageSender {
                                 current_retry, self.max_retries, e
                             );
                         }
+                        self.sending_raft_messages.fetch_sub(1, Ordering::SeqCst);
                         return;
                     }
                 }
@@ -317,11 +320,10 @@ pub struct RaftNode<S: Store> {
     pub rcv: mpsc::Receiver<Message>,
     pub snd: mpsc::Sender<Message>,
     store: S,
-    // #[allow(dead_code)]
-    // msg_tx: mpsc::Sender<MessageSender>,
     uncommitteds: HashMap<u64, ReplyChan>,
     should_quit: bool,
     seq: AtomicU64,
+    sending_raft_messages: Arc<AtomicIsize>,
     last_snap_time: Instant,
     cfg: Arc<Config>,
 }
@@ -351,6 +353,7 @@ impl<S: Store + 'static> RaftNode<S> {
         let mut inner = RawNode::new(&config, storage, logger)?;
         let peers = HashMap::new();
         let seq = AtomicU64::new(0);
+        let sending_raft_messages = Arc::new(AtomicIsize::new(0));
         let last_snap_time = Instant::now(); // + cfg.snapshot_interval;
 
         inner.raft.become_candidate();
@@ -368,6 +371,7 @@ impl<S: Store + 'static> RaftNode<S> {
             seq,
             snd,
             should_quit: false,
+            sending_raft_messages,
             last_snap_time,
             cfg,
         };
@@ -389,6 +393,7 @@ impl<S: Store + 'static> RaftNode<S> {
         let inner = RawNode::new(&config, storage, logger)?;
         let peers = HashMap::new();
         let seq = AtomicU64::new(0);
+        let sending_raft_messages = Arc::new(AtomicIsize::new(0));
         let last_snap_time = Instant::now(); // + cfg.snapshot_interval;
                                              // let msg_tx = Self::start_message_sender();
         let uncommitteds = HashMap::new();
@@ -402,6 +407,7 @@ impl<S: Store + 'static> RaftNode<S> {
             seq,
             snd,
             should_quit: false,
+            sending_raft_messages,
             last_snap_time,
             cfg,
         })
@@ -467,13 +473,16 @@ impl<S: Store + 'static> RaftNode<S> {
     }
 
     #[inline]
-    fn status(&self) -> Status {
+    fn status(&self, merger_proposals: usize) -> Status {
         debug!("raft status.ss: {:?}", self.inner.status().ss);
         let leader_id = self.raft.leader_id;
+        let sending_raft_messages = self.sending_raft_messages.load(Ordering::SeqCst);
         Status {
             id: self.inner.raft.id,
             leader_id,
             uncommitteds: self.uncommitteds.len(),
+            merger_proposals,
+            sending_raft_messages,
             active_mailbox_sends: active_mailbox_sends(),
             active_mailbox_querys: active_mailbox_querys(),
             active_send_proposal_grpc_requests: send_proposal_active_requests(),
@@ -521,7 +530,7 @@ impl<S: Store + 'static> RaftNode<S> {
     }
 
     #[inline]
-    fn send_wrong_leader(&self, chan: oneshot::Sender<RaftResponse>) {
+    fn send_wrong_leader(&self, from: &str, chan: oneshot::Sender<RaftResponse>) {
         let leader_id = self.leader();
         // leader can't be an empty node
         let leader_addr = self
@@ -533,7 +542,10 @@ impl<S: Store + 'static> RaftNode<S> {
             leader_addr,
         };
         if let Err(e) = chan.send(raft_response) {
-            warn!("send_wrong_leader, RaftResponse send error: {:?}", e);
+            warn!(
+                "send_wrong_leader, from: {}, RaftResponse send error: {:?}",
+                from, e
+            );
         }
     }
 
@@ -555,8 +567,8 @@ impl<S: Store + 'static> RaftNode<S> {
     }
 
     #[inline]
-    fn send_status(&self, chan: oneshot::Sender<RaftResponse>) {
-        if let Err(e) = chan.send(RaftResponse::Status(self.status())) {
+    fn send_status(&self, merger: &Merger, chan: oneshot::Sender<RaftResponse>) {
+        if let Err(e) = chan.send(RaftResponse::Status(self.status(merger.len()))) {
             warn!("Message::Status, RaftResponse send error: {:?}", e);
         }
     }
@@ -590,6 +602,7 @@ impl<S: Store + 'static> RaftNode<S> {
                 warn!("Quitting raft");
                 return Ok(());
             }
+
             match timeout(heartbeat, self.rcv.next()).await {
                 Ok(Some(Message::ConfigChange { chan, mut change })) => {
                     info!("change Received, {:?}", change);
@@ -601,7 +614,7 @@ impl<S: Store + 'static> RaftNode<S> {
                     if !self.is_leader() {
                         // wrong leader send client cluster data
                         // TODO: retry strategy in case of failure
-                        self.send_wrong_leader(chan);
+                        self.send_wrong_leader("ConfigChange", chan);
                     } else {
                         // leader assign new id to peer
                         info!("received request from: {}", change.get_node_id());
@@ -623,6 +636,13 @@ impl<S: Store + 'static> RaftNode<S> {
                         m
                     );
                     let msg_type = m.get_msg_type();
+                    if MessageType::MsgTransferLeader == msg_type {
+                        info!(
+                            "raft message MsgTransferLeader, snapshot_received: {}, raft.leader_id: {}, {:?}",
+                            snapshot_received, self.raft.leader_id, m
+                        );
+                    }
+
                     if !snapshot_received && msg_type == MessageType::MsgHeartbeat {
                         info!(
                             "raft message, snapshot_received: {}, has_leader: {}, {:?}",
@@ -646,7 +666,7 @@ impl<S: Store + 'static> RaftNode<S> {
                     let now = Instant::now();
                     if !self.is_leader() {
                         debug!("Message::Propose, send_wrong_leader {:?}", proposal);
-                        self.send_wrong_leader(chan);
+                        self.send_wrong_leader("Propose", chan);
                     } else {
                         merger.add(proposal, chan);
                         self.take_and_propose(&mut merger);
@@ -671,19 +691,22 @@ impl<S: Store + 'static> RaftNode<S> {
                 }
 
                 Ok(Some(Message::RequestId { chan })) => {
+                    debug!("requested Id, is_leader: {}", self.is_leader());
                     if !self.is_leader() {
-                        // TODO: retry strategy in case of failure
-                        info!("requested Id, but not leader");
-                        self.send_wrong_leader(chan);
+                        self.send_wrong_leader("RequestId", chan);
                     } else {
                         self.send_leader_id(chan);
                     }
                 }
                 Ok(Some(Message::Status { chan })) => {
-                    self.send_status(chan);
+                    self.send_status(&merger, chan);
                 }
                 Ok(Some(Message::ReportUnreachable { node_id })) => {
-                    debug!("Message::ReportUnreachable, node_id: {}", node_id);
+                    debug!(
+                        "Message::ReportUnreachable, node_id: {}, sending_raft_messages: {}",
+                        node_id,
+                        self.sending_raft_messages.load(Ordering::SeqCst)
+                    );
                     self.report_unreachable(node_id);
                 }
                 Ok(None) => {
@@ -697,11 +720,18 @@ impl<S: Store + 'static> RaftNode<S> {
 
             let elapsed = now.elapsed();
             now = Instant::now();
+
             if elapsed >= heartbeat {
-                heartbeat = self.cfg.heartbeat;
                 if elapsed > Duration::from_millis(500) {
-                    warn!("raft tick elapsed: {:?}", elapsed);
+                    warn!(
+                        "[run] raft tick elapsed: {:?}, heartbeat: {:?}, uncommitteds: {}, sending_raft_messages: {}",
+                        elapsed,
+                        heartbeat,
+                        self.uncommitteds.len(),
+                        self.sending_raft_messages.load(Ordering::SeqCst),
+                    );
                 }
+                heartbeat = self.cfg.heartbeat;
                 self.tick();
             } else {
                 heartbeat -= elapsed;
@@ -716,8 +746,13 @@ impl<S: Store + 'static> RaftNode<S> {
                 );
                 return Err(e);
             }
-            if on_ready_now.elapsed() > Duration::from_millis(200) {
-                warn!("raft on_ready(..) elapsed: {:?}", on_ready_now.elapsed());
+            if on_ready_now.elapsed() > Duration::from_millis(500) {
+                warn!(
+                    "[run] raft on_ready(..) uncommitteds: {}, sending_raft_messages: {}, elapsed: {:?}",
+                    self.uncommitteds.len(),
+                    self.sending_raft_messages.load(Ordering::SeqCst),
+                    on_ready_now.elapsed()
+                );
             }
         }
     }
@@ -792,16 +827,17 @@ impl<S: Store + 'static> RaftNode<S> {
                 chan: self.snd.clone(),
                 max_retries: 1,
                 timeout: Duration::from_millis(500),
+                sending_raft_messages: self.sending_raft_messages.clone(),
             };
-            // if let Err(e) = self.msg_tx.try_send(message_sender) {
-            //     log::warn!("msg_tx.try_send, error: {:?}", e.to_string());
-            // }
+            self.sending_raft_messages.fetch_add(1, Ordering::SeqCst);
             tokio::spawn(message_sender.send());
         }
     }
 
     async fn handle_committed_entries(&mut self, committed_entries: Vec<Entry>) -> Result<()> {
         // Fitler out empty entries produced by new elected leaders.
+        let committed_entries_count = committed_entries.len();
+        let now = std::time::Instant::now();
         for entry in committed_entries {
             if entry.data.is_empty() {
                 // From new elected leaders.
@@ -812,6 +848,23 @@ impl<S: Store + 'static> RaftNode<S> {
             } else {
                 self.handle_normal(&entry).await?;
             }
+        }
+
+        if now.elapsed().as_millis() > 500 {
+            log::info!(
+                "[handle_committed_entries] uncommitteds.len(): {}, sending_raft_messages: {}, \
+                committed_entries_count: {}, raft.inflight_buffers_size: {}, \
+                raft.msgs: {}, raft.group_commit: {}, raft.pending_read_count: {}, raft.ready_read_count: {}, \
+                 raft.soft_state: {:?}, raft.hard_state: {:?}, raft.state: {:?}, raft.heartbeat_elapsed: {}, \
+                 self.raft.read_states: {}, raft.heartbeat_timeout: {}, raft.heartbeat_elapsed: {}, \
+                 cost time: {:?}",
+                self.uncommitteds.len(), self.sending_raft_messages.load(Ordering::SeqCst),
+                committed_entries_count, self.raft.inflight_buffers_size(), self.raft.msgs.len(),
+                self.raft.group_commit(), self.raft.pending_read_count(), self.raft.ready_read_count(),
+                self.raft.soft_state(), self.raft.hard_state(), self.raft.state, self.raft.heartbeat_elapsed(),
+                self.raft.read_states.len(), self.raft.heartbeat_timeout(), self.raft.heartbeat_elapsed(),
+                now.elapsed()
+            );
         }
         Ok(())
     }
@@ -887,10 +940,12 @@ impl<S: Store + 'static> RaftNode<S> {
         ) {
             (Proposals::One(data), chan) => {
                 let apply_start = std::time::Instant::now();
-                let reply = self.store.apply(&data).await;
+                let reply =
+                    tokio::time::timeout(Duration::from_secs(5), self.store.apply(&data)).await;
                 if apply_start.elapsed().as_secs() > 3 {
                     log::warn!("apply, cost time: {:?}", apply_start.elapsed());
                 }
+                let reply = reply.unwrap_or_else(|e| Err(Error::from(e)));
                 if let Some(ReplyChan::One((chan, inst))) = chan {
                     let res = match reply {
                         Ok(data) => RaftResponse::Response { data },
@@ -898,9 +953,11 @@ impl<S: Store + 'static> RaftNode<S> {
                     };
                     if let Err(_resp) = chan.send(res) {
                         warn!(
-                            "[handle_normal] send RaftResponse error, seq:{}, cost time: {:?}",
+                            "[handle_normal] send RaftResponse error, seq:{}, cost time: {:?}, uncommitteds: {}, sending_raft_messages: {}",
                             seq,
-                            inst.elapsed()
+                            inst.elapsed(),
+                            self.uncommitteds.len(),
+                            self.sending_raft_messages.load(Ordering::SeqCst)
                         );
                     }
                 }
@@ -913,16 +970,20 @@ impl<S: Store + 'static> RaftNode<S> {
                 };
                 while let Some(data) = datas.pop() {
                     let apply_start = std::time::Instant::now();
-                    let reply = self.store.apply(&data).await;
+                    let reply =
+                        tokio::time::timeout(Duration::from_secs(5), self.store.apply(&data)).await;
                     if apply_start.elapsed().as_secs() > 3 {
                         log::warn!("apply, cost time: {:?}", apply_start.elapsed());
                     }
+                    let reply = reply.unwrap_or_else(|e| Err(Error::from(e)));
                     if let Some((chan, inst)) = chans.as_mut().and_then(|cs| cs.pop()) {
                         if inst.elapsed().as_secs() > 3 {
                             warn!(
-                                "[handle_normal] cost time, {:?}, chan is canceled: {}",
+                                "[handle_normal] cost time, {:?}, chan is canceled: {}, uncommitteds: {}, sending_raft_messages: {}",
                                 inst.elapsed(),
-                                chan.is_canceled()
+                                chan.is_canceled(),
+                                self.uncommitteds.len(),
+                                self.sending_raft_messages.load(Ordering::SeqCst)
                             );
                         }
                         let res = match reply {
