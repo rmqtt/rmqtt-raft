@@ -19,7 +19,6 @@ use tonic::Request;
 use crate::error::{Error, Result};
 use crate::message::{Merger, Message, Proposals, RaftResponse, ReplyChan, Status};
 use crate::raft::Store;
-use crate::raft::{active_mailbox_querys, active_mailbox_sends};
 use crate::raft_server::{send_message_active_requests, send_proposal_active_requests};
 use crate::raft_service::raft_service_client::RaftServiceClient;
 use crate::raft_service::{connect, Message as RraftMessage, Proposal as RraftProposal, Query};
@@ -483,8 +482,6 @@ impl<S: Store + 'static> RaftNode<S> {
             uncommitteds: self.uncommitteds.len(),
             merger_proposals,
             sending_raft_messages,
-            active_mailbox_sends: active_mailbox_sends(),
-            active_mailbox_querys: active_mailbox_querys(),
             active_send_proposal_grpc_requests: send_proposal_active_requests(),
             active_send_message_grpc_requests: send_message_active_requests(),
             peers: self.peer_addrs(),

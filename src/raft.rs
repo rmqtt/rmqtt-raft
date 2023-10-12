@@ -1,5 +1,4 @@
 use std::net::{SocketAddr, ToSocketAddrs};
-use std::sync::atomic::{AtomicIsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -9,7 +8,6 @@ use futures::channel::{mpsc, oneshot};
 use futures::future::FutureExt;
 use futures::SinkExt;
 use log::{debug, info, warn};
-use once_cell::sync::Lazy;
 use prost::Message as _;
 use tikv_raft::eraftpb::{ConfChange, ConfChangeType};
 use tokio::time::timeout;
@@ -64,17 +62,6 @@ pub struct Mailbox {
     grpc_breaker_retry_interval: i64,
 }
 
-static MAILBOX_SENDS: Lazy<Arc<AtomicIsize>> = Lazy::new(|| Arc::new(AtomicIsize::new(0)));
-static MAILBOX_QUERYS: Lazy<Arc<AtomicIsize>> = Lazy::new(|| Arc::new(AtomicIsize::new(0)));
-
-pub fn active_mailbox_sends() -> isize {
-    MAILBOX_SENDS.load(Ordering::SeqCst)
-}
-
-pub fn active_mailbox_querys() -> isize {
-    MAILBOX_QUERYS.load(Ordering::SeqCst)
-}
-
 impl Mailbox {
     #[inline]
     pub fn pears(&self) -> Vec<(u64, Peer)> {
@@ -119,85 +106,73 @@ impl Mailbox {
     }
 
     #[inline]
-    pub async fn send(&self, message: Vec<u8>) -> Result<Vec<u8>> {
-        MAILBOX_SENDS.fetch_add(1, Ordering::SeqCst);
-        let reply = self._send(message).await;
-        MAILBOX_SENDS.fetch_sub(1, Ordering::SeqCst);
-        reply
-    }
-
-    #[inline]
-    async fn _send(&self, message: Vec<u8>) -> Result<Vec<u8>> {
-        let (target_leader_id, target_leader_addr) = {
-            let (tx, rx) = oneshot::channel();
-            let proposal = Message::Propose {
-                proposal: message.clone(),
-                chan: tx,
-            };
-            let mut sender = self.sender.clone();
-            sender
-                .try_send(proposal)
-                .map_err(|e| Error::SendError(e.to_string()))?;
-            let reply = timeout(self.grpc_timeout, rx).await;
-            let reply = reply
-                .map_err(|e| Error::RecvError(e.to_string()))?
-                .map_err(|e| Error::RecvError(e.to_string()))?;
-            match reply {
-                RaftResponse::Response { data } => return Ok(data),
-                RaftResponse::WrongLeader {
-                    leader_id,
-                    leader_addr,
-                } => (leader_id, leader_addr),
-                RaftResponse::Error(e) => return Err(Error::from(e)),
-                _ => {
-                    warn!("Recv other raft response: {:?}", reply);
-                    return Err(Error::Unknown);
+    pub async fn send_proposal(&self, message: Vec<u8>) -> Result<Vec<u8>> {
+        match self.get_leader_info().await? {
+            (true, _, _) => {
+                debug!("this node is leader");
+                let (tx, rx) = oneshot::channel();
+                let proposal = Message::Propose {
+                    proposal: message.clone(),
+                    chan: tx,
+                };
+                let mut sender = self.sender.clone();
+                sender
+                    .send(proposal)
+                    .await //.try_send(proposal)
+                    .map_err(|e| Error::SendError(e.to_string()))?;
+                let reply = timeout(self.grpc_timeout, rx).await;
+                let reply = reply
+                    .map_err(|e| Error::RecvError(e.to_string()))?
+                    .map_err(|e| Error::RecvError(e.to_string()))?;
+                match reply {
+                    RaftResponse::Response { data } => return Ok(data),
+                    _ => {
+                        warn!("Recv other raft response: {:?}", reply);
+                        return Err(Error::Unknown);
+                    }
                 }
             }
-        };
-
-        debug!(
-            "This node not is Leader, leader_id: {:?}, leader_addr: {:?}",
-            target_leader_id, target_leader_addr
-        );
-
-        if let Some(target_leader_addr) = target_leader_addr {
-            if target_leader_id != 0 {
-                return match self
-                    .send_to_leader(message, target_leader_id, target_leader_addr.clone())
-                    .await?
-                {
-                    RaftResponse::Response { data } => Ok(data),
-                    RaftResponse::WrongLeader {
-                        leader_id,
-                        leader_addr,
-                    } => {
-                        warn!("The target node is not the Leader, target_leader_id: {}, target_leader_addr: {:?}, actual_leader_id: {}, actual_leader_addr: {:?}",
+            (false, target_leader_id, target_leader_addr) => {
+                debug!(
+                    "This node not is Leader, leader_id: {:?}, leader_addr: {:?}",
+                    target_leader_id, target_leader_addr
+                );
+                if let Some(target_leader_addr) = target_leader_addr {
+                    if target_leader_id != 0 {
+                        return match self
+                            .send_to_leader(message, target_leader_id, target_leader_addr.clone())
+                            .await?
+                        {
+                            RaftResponse::Response { data } => return Ok(data),
+                            RaftResponse::WrongLeader {
+                                leader_id,
+                                leader_addr,
+                            } => {
+                                warn!("The target node is not the Leader, target_leader_id: {}, target_leader_addr: {:?}, actual_leader_id: {}, actual_leader_addr: {:?}",
                             target_leader_id, target_leader_addr, leader_id, leader_addr);
-                        Err(Error::NotLeader)
+                                return Err(Error::NotLeader);
+                            }
+                            RaftResponse::Error(e) => Err(Error::from(e)),
+                            _ => {
+                                warn!("Recv other raft response, target_leader_id: {}, target_leader_addr: {:?}", target_leader_id, target_leader_addr);
+                                return Err(Error::Unknown);
+                            }
+                        };
                     }
-                    RaftResponse::Error(e) => Err(Error::from(e)),
-                    _ => {
-                        warn!("Recv other raft response, target_leader_id: {}, target_leader_addr: {:?}", target_leader_id, target_leader_addr);
-                        Err(Error::Unknown)
-                    }
-                };
+                }
             }
         }
-
         Err(Error::LeaderNotExist)
     }
 
     #[inline]
-    pub async fn query(&self, query: Vec<u8>) -> Result<Vec<u8>> {
-        MAILBOX_QUERYS.fetch_add(1, Ordering::SeqCst);
-        let reply = self._query(query).await;
-        MAILBOX_QUERYS.fetch_sub(1, Ordering::SeqCst);
-        reply
+    #[deprecated]
+    pub async fn send(&self, message: Vec<u8>) -> Result<Vec<u8>> {
+        self.send_proposal(message).await
     }
 
     #[inline]
-    async fn _query(&self, query: Vec<u8>) -> Result<Vec<u8>> {
+    pub async fn query(&self, query: Vec<u8>) -> Result<Vec<u8>> {
         let (tx, rx) = oneshot::channel();
         let mut sender = self.sender.clone();
         match sender.try_send(Message::Query { query, chan: tx }) {
@@ -235,6 +210,24 @@ impl Mailbox {
         match sender.send(Message::Status { chan: tx }).await {
             Ok(_) => match timeout(self.grpc_timeout, rx).await {
                 Ok(Ok(RaftResponse::Status(status))) => Ok(status),
+                Ok(Ok(RaftResponse::Error(e))) => Err(Error::from(e)),
+                _ => Err(Error::Unknown),
+            },
+            Err(e) => Err(Error::SendError(e.to_string())),
+        }
+    }
+
+    #[inline]
+    async fn get_leader_info(&self) -> Result<(bool, u64, Option<String>)> {
+        let (tx, rx) = oneshot::channel();
+        let mut sender = self.sender.clone();
+        match sender.send(Message::RequestId { chan: tx }).await {
+            Ok(_) => match timeout(self.grpc_timeout, rx).await {
+                Ok(Ok(RaftResponse::RequestId { leader_id })) => Ok((true, leader_id, None)),
+                Ok(Ok(RaftResponse::WrongLeader {
+                    leader_id,
+                    leader_addr,
+                })) => Ok((false, leader_id, leader_addr)),
                 Ok(Ok(RaftResponse::Error(e))) => Err(Error::from(e)),
                 _ => Err(Error::Unknown),
             },
@@ -296,10 +289,7 @@ impl<S: Store + Send + Sync + 'static> Raft<S> {
                 let _addr = addr.clone();
                 match self.request_leader(addr).await {
                     Ok(reply) => Ok(reply),
-                    Err(e) => {
-                        info!("find_leader, addr: {}, {:?}", _addr, e);
-                        Err(e)
-                    }
+                    Err(e) => Err(e),
                 }
             };
             futs.push(fut.boxed());
@@ -311,7 +301,6 @@ impl<S: Store + Send + Sync + 'static> Raft<S> {
             Err(_e) => return Ok(None),
         };
 
-        info!("leader_id: {}, leader_addr: {}", leader_id, leader_addr);
         if leader_id == 0 {
             Ok(None)
         } else {
