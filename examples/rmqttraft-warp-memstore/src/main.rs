@@ -5,18 +5,19 @@ extern crate slog_term;
 
 use async_trait::async_trait;
 use bincode::{deserialize, serialize};
-use rmqtt_raft::{Mailbox, Raft, Result as RaftResult, Store, Config};
+use rmqtt_raft::{Config, Mailbox, Raft, Result as RaftResult, Store};
 use serde::{Deserialize, Serialize};
-use slog::Drain;
 use slog::info;
+use slog::Drain;
 use std::collections::HashMap;
 use std::convert::From;
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::str::FromStr;
 use std::sync::{Arc, RwLock};
+use std::time::Duration;
 use structopt::StructOpt;
-use warp::{Filter, reply};
+use warp::{reply, Filter};
 
 #[derive(Debug, StructOpt)]
 struct Options {
@@ -93,11 +94,11 @@ impl Store for HashStore {
 
 fn with_mailbox(
     mailbox: Arc<Mailbox>,
-) -> impl Filter<Extract=(Arc<Mailbox>, ), Error=Infallible> + Clone {
+) -> impl Filter<Extract = (Arc<Mailbox>,), Error = Infallible> + Clone {
     warp::any().map(move || mailbox.clone())
 }
 
-fn with_store(store: HashStore) -> impl Filter<Extract=(HashStore, ), Error=Infallible> + Clone {
+fn with_store(store: HashStore) -> impl Filter<Extract = (HashStore,), Error = Infallible> + Clone {
     warp::any().map(move || store.clone())
 }
 
@@ -129,8 +130,10 @@ async fn leave(mailbox: Arc<Mailbox>) -> Result<impl warp::Reply, Infallible> {
 }
 
 async fn status(mailbox: Arc<Mailbox>) -> Result<impl warp::Reply, Infallible> {
-    let response = mailbox.status().await.unwrap();
-    Ok(reply::json(&response))
+    match mailbox.status().await {
+        Err(e) => Ok(reply::json(&e.to_string())),
+        Ok(response) => Ok(reply::json(&response)),
+    }
 }
 
 //target\release\rmqttraft-warp-memstore.exe --id 1 --raft-laddr "127.0.0.1:5001" --peer-addr "127.0.0.1:5002" --peer-addr "127.0.0.1:5003" --web-server "0.0.0.0:8081"
@@ -151,7 +154,6 @@ async fn status(mailbox: Arc<Mailbox>) -> Result<impl warp::Reply, Infallible> {
 //./target/debug/rmqttraft-warp-memstore --id 2 --raft-laddr "127.0.0.1:5002" --peer-addr "127.0.0.1:5001" --peer-addr "127.0.0.1:5003" --web-server "0.0.0.0:8082" > out_2.log 2>&1 &
 //./target/debug/rmqttraft-warp-memstore --id 3 --raft-laddr "127.0.0.1:5003" --peer-addr "127.0.0.1:5001" --peer-addr "127.0.0.1:5002" --web-server "0.0.0.0:8083" > out_3.log 2>&1 &
 
-
 // wrk -c 100 -t4 -d60s -H "Connection: keep-alive" "http://127.0.0.1:8081/put/key1/val-1"
 // wrk -c 100 -t4 -d60s -H "Connection: keep-alive" "http://127.0.0.1:8082/put/key1/val-2"
 // wrk -c 100 -t6 -d60s -H "Connection: keep-alive" "http://127.0.0.1:8083/get/key1"
@@ -164,6 +166,8 @@ async fn status(mailbox: Arc<Mailbox>) -> Result<impl warp::Reply, Infallible> {
 // ab -n 50000 -c 1000 "http://127.0.0.1:8082/put/key2/val-1"
 // ab -n 50000 -c 1000 "http://127.0.0.1:8083/put/key3/val-1"
 
+// http://127.0.0.1:8081/status
+
 #[tokio::main]
 async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let decorator = slog_term::TermDecorator::new().build();
@@ -172,6 +176,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let logger = slog::Logger::root(drain, slog_o!("version" => env!("CARGO_PKG_VERSION")));
 
     // converts log to slog
+    #[allow(clippy::let_unit_value)]
     let _log_guard = slog_stdlog::init().unwrap();
 
     let options = Options::from_args();
