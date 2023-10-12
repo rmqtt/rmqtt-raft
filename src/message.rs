@@ -59,8 +59,6 @@ pub struct Status {
     pub uncommitteds: usize,
     pub merger_proposals: usize,
     pub sending_raft_messages: isize,
-    pub active_send_proposal_grpc_requests: isize,
-    pub active_send_message_grpc_requests: isize,
     pub peers: HashMap<u64, String>,
 }
 

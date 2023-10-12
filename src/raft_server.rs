@@ -1,5 +1,4 @@
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicIsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -7,7 +6,6 @@ use bincode::serialize;
 use futures::channel::{mpsc, oneshot};
 use futures::SinkExt;
 use log::{info, warn};
-use once_cell::sync::Lazy;
 use prost::Message as _;
 use tikv_raft::eraftpb::{ConfChange, Message as RaftMessage};
 use tokio::time::timeout;
@@ -140,7 +138,6 @@ impl RaftService for RaftServer {
     ) -> Result<Response<raft_service::RaftResponse>, Status> {
         let message = RaftMessage::decode(request.into_inner().inner.as_ref())
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
-        SEND_MESSAGE_ACTIVE_REQUESTS.fetch_add(1, Ordering::SeqCst);
         let reply = match self.snd.clone().try_send(Message::Raft(Box::new(message))) {
             Ok(()) => {
                 let response = RaftResponse::Ok;
@@ -150,7 +147,6 @@ impl RaftService for RaftServer {
             }
             Err(_) => Err(Status::unavailable("error for try send message")),
         };
-        SEND_MESSAGE_ACTIVE_REQUESTS.fetch_sub(1, Ordering::SeqCst);
         reply
     }
 
@@ -158,7 +154,6 @@ impl RaftService for RaftServer {
         &self,
         req: Request<raft_service::Proposal>,
     ) -> Result<Response<raft_service::RaftResponse>, Status> {
-        SEND_PROPOSAL_ACTIVE_REQUESTS.fetch_add(1, Ordering::SeqCst);
         let proposal = req.into_inner().inner;
         let mut sender = self.snd.clone();
         let (tx, rx) = oneshot::channel();
@@ -187,8 +182,6 @@ impl RaftService for RaftServer {
                 Err(Status::unavailable("error for try send message"))
             }
         };
-
-        SEND_PROPOSAL_ACTIVE_REQUESTS.fetch_sub(1, Ordering::SeqCst);
         reply
     }
 
@@ -229,18 +222,4 @@ impl RaftService for RaftServer {
 
         Ok(Response::new(reply))
     }
-}
-
-static SEND_PROPOSAL_ACTIVE_REQUESTS: Lazy<Arc<AtomicIsize>> =
-    Lazy::new(|| Arc::new(AtomicIsize::new(0)));
-
-static SEND_MESSAGE_ACTIVE_REQUESTS: Lazy<Arc<AtomicIsize>> =
-    Lazy::new(|| Arc::new(AtomicIsize::new(0)));
-
-pub fn send_proposal_active_requests() -> isize {
-    SEND_PROPOSAL_ACTIVE_REQUESTS.load(Ordering::SeqCst)
-}
-
-pub fn send_message_active_requests() -> isize {
-    SEND_MESSAGE_ACTIVE_REQUESTS.load(Ordering::SeqCst)
 }
