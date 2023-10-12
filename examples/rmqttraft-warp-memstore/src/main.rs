@@ -15,7 +15,6 @@ use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::str::FromStr;
 use std::sync::{Arc, RwLock};
-use std::time::Duration;
 use structopt::StructOpt;
 use warp::{reply, Filter};
 
@@ -109,7 +108,7 @@ async fn put(
 ) -> Result<impl warp::Reply, Infallible> {
     let message = Message::Insert { key, value };
     let message = serialize(&message).unwrap();
-    let result = mailbox.send(message).await;
+    let result = mailbox.send_proposal(message).await;
     match result {
         Ok(r) => {
             let result: String = deserialize(&r).unwrap();
