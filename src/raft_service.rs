@@ -31,13 +31,16 @@ pub(crate) fn endpoint(
 pub(crate) async fn connect(
     saddr: &str,
     concurrency_limit: usize,
+    message_size: usize,
     timeout: Duration,
 ) -> Result<RaftServiceClientType> {
     Ok(RaftServiceClientType::new(
         endpoint(saddr, concurrency_limit, timeout)?
             .connect()
             .await?,
-    ))
+    )
+    .max_decoding_message_size(message_size)
+    .max_encoding_message_size(message_size))
 }
 
 #[inline]

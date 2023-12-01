@@ -58,6 +58,7 @@ pub struct Mailbox {
     sender: mpsc::Sender<Message>,
     grpc_timeout: Duration,
     grpc_concurrency_limit: usize,
+    grpc_message_size: usize,
     grpc_breaker_threshold: u64,
     grpc_breaker_retry_interval: i64,
 }
@@ -83,6 +84,7 @@ impl Mailbox {
                     leader_addr,
                     self.grpc_timeout,
                     self.grpc_concurrency_limit,
+                    self.grpc_message_size,
                     self.grpc_breaker_threshold,
                     self.grpc_breaker_retry_interval,
                 )
@@ -276,6 +278,7 @@ impl<S: Store + Send + Sync + 'static> Raft<S> {
             sender: self.tx.clone(),
             grpc_timeout: self.cfg.grpc_timeout,
             grpc_concurrency_limit: self.cfg.grpc_concurrency_limit,
+            grpc_message_size: self.cfg.grpc_message_size,
             grpc_breaker_threshold: self.cfg.grpc_breaker_threshold,
             grpc_breaker_retry_interval: self.cfg.grpc_breaker_retry_interval.as_millis() as i64,
         }
@@ -310,7 +313,13 @@ impl<S: Store + Send + Sync + 'static> Raft<S> {
 
     async fn request_leader(&self, peer_addr: String) -> Result<Option<(u64, String)>> {
         let (leader_id, leader_addr): (u64, String) = {
-            let mut client = connect(&peer_addr, 1, self.cfg.grpc_timeout).await?;
+            let mut client = connect(
+                &peer_addr,
+                1,
+                self.cfg.grpc_message_size,
+                self.cfg.grpc_timeout,
+            )
+            .await?;
             let response = client
                 .request_id(Request::new(Empty::default()))
                 .await?

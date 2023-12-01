@@ -40,7 +40,9 @@ impl RaftServer {
         let laddr = self.laddr;
         let _cfg = self.cfg.clone();
         info!("listening gRPC requests on: {}", laddr);
-        let svc = RaftServiceServer::new(self);
+        let svc = RaftServiceServer::new(self)
+            .max_decoding_message_size(_cfg.grpc_message_size)
+            .max_encoding_message_size(_cfg.grpc_message_size);
         let server = Server::builder().add_service(svc);
 
         #[cfg(any(feature = "reuseport", feature = "reuseaddr"))]

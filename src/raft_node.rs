@@ -150,6 +150,7 @@ pub struct Peer {
     grpc_fail_time: Arc<AtomicI64>,
     crw_timeout: Duration,
     concurrency_limit: usize,
+    grpc_message_size: usize,
     grpc_breaker_threshold: u64,
     grpc_breaker_retry_interval: i64,
     active_tasks: Arc<AtomicI64>,
@@ -160,6 +161,7 @@ impl Peer {
         addr: String,
         crw_timeout: Duration,
         concurrency_limit: usize,
+        grpc_message_size: usize,
         grpc_breaker_threshold: u64,
         grpc_breaker_retry_interval: i64,
     ) -> Peer {
@@ -171,6 +173,7 @@ impl Peer {
             grpc_fail_time: Arc::new(AtomicI64::new(0)),
             crw_timeout,
             concurrency_limit,
+            grpc_message_size,
             grpc_breaker_threshold,
             grpc_breaker_retry_interval,
             active_tasks: Arc::new(AtomicI64::new(0)),
@@ -198,7 +201,13 @@ impl Peer {
             return Ok(c.clone());
         }
 
-        let c = connect(&self.addr, self.concurrency_limit, self.crw_timeout).await?;
+        let c = connect(
+            &self.addr,
+            self.concurrency_limit,
+            self.grpc_message_size,
+            self.crw_timeout,
+        )
+        .await?;
         client.replace(c.clone());
         Ok(c)
     }
@@ -442,6 +451,7 @@ impl<S: Store + 'static> RaftNode<S> {
             addr.to_string(),
             self.cfg.grpc_timeout,
             self.cfg.grpc_concurrency_limit,
+            self.cfg.grpc_message_size,
             self.cfg.grpc_breaker_threshold,
             self.cfg.grpc_breaker_retry_interval.as_millis() as i64,
         );

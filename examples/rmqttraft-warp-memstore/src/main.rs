@@ -184,6 +184,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let cfg = Config {
         reuseaddr: true,
         reuseport: true,
+        // grpc_message_size: 50 * 1024 * 1024,
         ..Default::default()
     };
     let raft = Raft::new(options.raft_laddr, store.clone(), logger.clone(), cfg)?;

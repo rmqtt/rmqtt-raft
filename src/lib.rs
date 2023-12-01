@@ -24,6 +24,7 @@ pub struct Config {
     pub reuseport: bool,
     pub grpc_timeout: Duration,
     pub grpc_concurrency_limit: usize,
+    pub grpc_message_size: usize,
     //GRPC failed to fuse threshold
     pub grpc_breaker_threshold: u64,
     pub grpc_breaker_retry_interval: Duration,
@@ -48,6 +49,7 @@ impl Default for Config {
             reuseport: false,
             grpc_timeout: Duration::from_secs(6),
             grpc_concurrency_limit: 200,
+            grpc_message_size: 50 * 1024 * 1024,
             grpc_breaker_threshold: 4,
             grpc_breaker_retry_interval: Duration::from_millis(2500),
             proposal_batch_size: 50,
