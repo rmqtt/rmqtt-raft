@@ -242,7 +242,7 @@ pub struct Raft<S: Store + 'static> {
     store: S,
     tx: mpsc::Sender<Message>,
     rx: mpsc::Receiver<Message>,
-    addr: SocketAddr,
+    laddr: SocketAddr,
     logger: slog::Logger,
     cfg: Arc<Config>,
 }
@@ -250,12 +250,12 @@ pub struct Raft<S: Store + 'static> {
 impl<S: Store + Send + Sync + 'static> Raft<S> {
     /// creates a new node with the given address and store.
     pub fn new<A: ToSocketAddrs>(
-        addr: A,
+        laddr: A,
         store: S,
         logger: slog::Logger,
         cfg: Config,
     ) -> Result<Self> {
-        let addr = addr
+        let laddr = laddr
             .to_socket_addrs()?
             .next()
             .ok_or_else(|| Error::from("None"))?;
@@ -265,7 +265,7 @@ impl<S: Store + Send + Sync + 'static> Raft<S> {
             store,
             tx,
             rx,
-            addr,
+            laddr,
             logger,
             cfg,
         })
@@ -352,7 +352,7 @@ impl<S: Store + Send + Sync + 'static> Raft<S> {
             self.cfg.clone(),
         )?;
 
-        let server = RaftServer::new(self.tx, self.addr, self.cfg.clone());
+        let server = RaftServer::new(self.tx, self.laddr, self.cfg.clone());
         let server_handle = async {
             if let Err(e) = server.run().await {
                 warn!("raft server run error: {:?}", e);
@@ -376,11 +376,10 @@ impl<S: Store + Send + Sync + 'static> Raft<S> {
         Ok(())
     }
 
-    /// Tries to join a new cluster at `addr`, getting an id from the leader, or finding it if
-    /// `addr` is not the current leader of the cluster
     pub async fn join(
         self,
         node_id: u64,
+        node_addr: String,
         leader_id: Option<u64>,
         leader_addr: String,
     ) -> Result<()> {
@@ -405,7 +404,7 @@ impl<S: Store + Send + Sync + 'static> Raft<S> {
         )?;
         let peer = node.add_peer(&leader_addr, leader_id);
         let mut client = peer.client().await?;
-        let server = RaftServer::new(self.tx, self.addr, self.cfg.clone());
+        let server = RaftServer::new(self.tx, self.laddr, self.cfg.clone());
         let server_handle = async {
             if let Err(e) = server.run().await {
                 warn!("raft server run error: {:?}", e);
@@ -438,8 +437,8 @@ impl<S: Store + Send + Sync + 'static> Raft<S> {
         let mut change = ConfChange::default();
         change.set_node_id(node_id);
         change.set_change_type(ConfChangeType::AddNode);
-        change.set_context(serialize(&self.addr.to_string())?);
-        // change.set_context(serialize(&self.addr)?);
+        change.set_context(serialize(&node_addr)?);
+        // change.set_context(serialize(&node_addr)?);
 
         let change = RiteraftConfChange {
             inner: ConfChange::encode_to_vec(&change),
