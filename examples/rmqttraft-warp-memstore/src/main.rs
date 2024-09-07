@@ -187,7 +187,12 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         // grpc_message_size: 50 * 1024 * 1024,
         ..Default::default()
     };
-    let raft = Raft::new(options.raft_laddr, store.clone(), logger.clone(), cfg)?;
+    let raft = Raft::new(
+        options.raft_laddr.clone(),
+        store.clone(),
+        logger.clone(),
+        cfg,
+    )?;
     let leader_info = raft.find_leader_info(options.peer_addrs).await?;
     info!(logger, "leader_info: {:?}", leader_info);
 
@@ -195,7 +200,12 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let (raft_handle, mailbox) = match leader_info {
         Some((leader_id, leader_addr)) => {
             info!(logger, "running in follower mode");
-            let handle = tokio::spawn(raft.join(options.id, Some(leader_id), leader_addr));
+            let handle = tokio::spawn(raft.join(
+                options.id,
+                options.raft_laddr,
+                Some(leader_id),
+                leader_addr,
+            ));
             (handle, mailbox)
         }
         None => {
