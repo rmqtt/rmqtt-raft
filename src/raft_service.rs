@@ -10,6 +10,20 @@ tonic::include_proto!("raftservice");
 
 pub(crate) type RaftServiceClientType = RaftServiceClient<Channel>;
 
+/// Creates a gRPC `Endpoint` for connecting to a Raft service.
+///
+/// This function constructs a gRPC `Endpoint` configured with the specified address, concurrency
+/// limit, and timeout settings. The `Endpoint` is used to establish a connection to the Raft
+/// service.
+///
+/// # Parameters
+/// - `saddr`: The server address in the form of a string (e.g., "127.0.0.1:50051").
+/// - `concurrency_limit`: The maximum number of concurrent requests allowed.
+/// - `timeout`: The connection timeout duration.
+///
+/// # Returns
+/// Returns a `Result` containing the configured `Endpoint` on success, or an error if the endpoint
+/// creation fails.
 #[inline]
 pub(crate) fn endpoint(
     saddr: &str,
@@ -27,6 +41,21 @@ pub(crate) fn endpoint(
     Ok(endpoint)
 }
 
+/// Establishes a connection to the Raft service and returns a client.
+///
+/// This asynchronous function creates a new `RaftServiceClient` instance, using the provided
+/// address, concurrency limit, message size, and timeout settings. The client is configured with
+/// the specified message size for both encoding and decoding.
+///
+/// # Parameters
+/// - `saddr`: The server address in the form of a string (e.g., "127.0.0.1:50051").
+/// - `concurrency_limit`: The maximum number of concurrent requests allowed.
+/// - `message_size`: The maximum size of messages for encoding and decoding.
+/// - `timeout`: The connection timeout duration.
+///
+/// # Returns
+/// Returns a `Result` containing the `RaftServiceClient` instance on success, or an error if the
+/// connection fails.
 #[inline]
 pub(crate) async fn connect(
     saddr: &str,
@@ -43,6 +72,20 @@ pub(crate) async fn connect(
     .max_encoding_message_size(message_size))
 }
 
+/// Binds a TCP listener to the specified address and returns a `TcpListenerStream`.
+///
+/// This function sets up a TCP listener with options for socket reuse and a backlog queue. It
+/// returns a `TcpListenerStream` that can be used to accept incoming connections. This is
+/// particularly useful for scenarios requiring high-performance and customizable socket options.
+///
+/// # Parameters
+/// - `laddr`: The local address to bind in the form of `std::net::SocketAddr`.
+/// - `backlog`: The maximum number of pending connections in the backlog queue.
+/// - `_reuseaddr`: Whether to enable the `SO_REUSEADDR` option on Unix-like systems.
+/// - `_reuseport`: Whether to enable the `SO_REUSEPORT` option on Unix-like systems.
+///
+/// # Returns
+/// Returns a `Result` containing the `TcpListenerStream` on success, or an error if the binding fails.
 #[inline]
 #[cfg(all(feature = "socket2", feature = "tokio-stream"))]
 pub fn bind(

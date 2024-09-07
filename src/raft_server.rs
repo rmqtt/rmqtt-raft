@@ -19,6 +19,7 @@ use crate::raft_service::{
 };
 use crate::{error, Config};
 
+/// A gRPC server that handles Raft-related requests.
 pub struct RaftServer {
     snd: mpsc::Sender<Message>,
     laddr: SocketAddr,
@@ -27,6 +28,17 @@ pub struct RaftServer {
 }
 
 impl RaftServer {
+    /// Creates a new instance of `RaftServer`.
+    ///
+    /// This function initializes a new `RaftServer` with the specified parameters.
+    ///
+    /// # Parameters
+    /// - `snd`: A sender for Raft messages.
+    /// - `laddr`: The local address where the server will listen for incoming requests.
+    /// - `cfg`: Configuration for the server, including gRPC timeouts and other settings.
+    ///
+    /// # Returns
+    /// Returns a new `RaftServer` instance.
     pub fn new(snd: mpsc::Sender<Message>, laddr: SocketAddr, cfg: Arc<Config>) -> Self {
         RaftServer {
             snd,
@@ -36,6 +48,13 @@ impl RaftServer {
         }
     }
 
+    /// Starts the gRPC server to handle Raft requests.
+    ///
+    /// This function sets up the gRPC server and listens for incoming requests. It uses
+    /// the `RaftServiceServer` to handle requests and manage configuration options.
+    ///
+    /// # Returns
+    /// Returns a `Result` indicating whether the server started successfully or if an error occurred.
     pub async fn run(self) -> error::Result<()> {
         let laddr = self.laddr;
         let _cfg = self.cfg.clone();
@@ -66,6 +85,16 @@ impl RaftServer {
 
 #[tonic::async_trait]
 impl RaftService for RaftServer {
+    /// Handles requests for a new Raft node ID.
+    ///
+    /// This method sends a `RequestId` message to the Raft node and waits for a response.
+    /// It returns the node ID if successful or an error status if not.
+    ///
+    /// # Parameters
+    /// - `req`: The incoming request containing no additional data.
+    ///
+    /// # Returns
+    /// Returns a `Response` containing the node ID or an error status.
     async fn request_id(
         &self,
         _: Request<Empty>,
@@ -99,6 +128,16 @@ impl RaftService for RaftServer {
         }
     }
 
+    /// Handles configuration change requests.
+    ///
+    /// This method processes a configuration change request by sending it to the Raft node
+    /// and waits for a response. It returns the result of the configuration change operation.
+    ///
+    /// # Parameters
+    /// - `req`: The incoming request containing the configuration change data.
+    ///
+    /// # Returns
+    /// Returns a `Response` containing the result of the configuration change or an error status.
     async fn change_config(
         &self,
         req: Request<RiteraftConfChange>,
@@ -134,13 +173,23 @@ impl RaftService for RaftServer {
         Ok(Response::new(reply))
     }
 
+    /// Handles sending Raft messages.
+    ///
+    /// This method processes a Raft message by sending it to the Raft node and returns
+    /// the result of the send operation.
+    ///
+    /// # Parameters
+    /// - `request`: The incoming request containing the Raft message data.
+    ///
+    /// # Returns
+    /// Returns a `Response` indicating success or an error status.
     async fn send_message(
         &self,
         request: Request<RiteraftMessage>,
     ) -> Result<Response<raft_service::RaftResponse>, Status> {
         let message = RaftMessage::decode(request.into_inner().inner.as_ref())
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
-        let reply = match self.snd.clone().try_send(Message::Raft(Box::new(message))) {
+        match self.snd.clone().try_send(Message::Raft(Box::new(message))) {
             Ok(()) => {
                 let response = RaftResponse::Ok;
                 Ok(Response::new(raft_service::RaftResponse {
@@ -148,10 +197,19 @@ impl RaftService for RaftServer {
                 }))
             }
             Err(_) => Err(Status::unavailable("error for try send message")),
-        };
-        reply
+        }
     }
 
+    /// Handles sending proposals.
+    ///
+    /// This method sends a proposal to the Raft node and waits for a response. It returns
+    /// the result of the proposal send operation.
+    ///
+    /// # Parameters
+    /// - `req`: The incoming request containing the proposal data.
+    ///
+    /// # Returns
+    /// Returns a `Response` containing the result of the proposal send operation or an error status.
     async fn send_proposal(
         &self,
         req: Request<raft_service::Proposal>,
@@ -161,7 +219,7 @@ impl RaftService for RaftServer {
         let (tx, rx) = oneshot::channel();
         let message = Message::Propose { proposal, chan: tx };
 
-        let reply = match sender.try_send(message) {
+        match sender.try_send(message) {
             Ok(()) => match timeout(self.timeout, rx).await {
                 Ok(Ok(raft_response)) => match serialize(&raft_response) {
                     Ok(resp) => Ok(Response::new(raft_service::RaftResponse { inner: resp })),
@@ -183,10 +241,19 @@ impl RaftService for RaftServer {
                 warn!("error for try send message, {}", e);
                 Err(Status::unavailable("error for try send message"))
             }
-        };
-        reply
+        }
     }
 
+    /// Handles sending queries.
+    ///
+    /// This method sends a query to the Raft node and waits for a response. It returns
+    /// the result of the query send operation.
+    ///
+    /// # Parameters
+    /// - `req`: The incoming request containing the query data.
+    ///
+    /// # Returns
+    /// Returns a `Response` containing the result of the query send operation or an error status.
     async fn send_query(
         &self,
         req: Request<raft_service::Query>,

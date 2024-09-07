@@ -64,6 +64,9 @@ pub struct Mailbox {
 }
 
 impl Mailbox {
+    /// Retrieves a list of peers with their IDs.
+    /// This method returns a vector containing tuples of peer IDs and their respective `Peer` objects.
+    /// It iterates over the internal `peers` map and collects the IDs and cloned `Peer` instances.
     #[inline]
     pub fn pears(&self) -> Vec<(u64, Peer)> {
         self.peers
@@ -107,6 +110,10 @@ impl Mailbox {
         proposal_sender.send().await
     }
 
+    /// Sends a proposal to the leader node.
+    /// This method first attempts to send the proposal to the local node if it is the leader.
+    /// If the node is not the leader, it retrieves the leader's address and sends the proposal to the leader node.
+    /// If the proposal is successfully handled, the method returns a `RaftResponse::Response` with the resulting data.
     #[inline]
     pub async fn send_proposal(&self, message: Vec<u8>) -> Result<Vec<u8>> {
         match self.get_leader_info().await? {
@@ -167,12 +174,16 @@ impl Mailbox {
         Err(Error::LeaderNotExist)
     }
 
+    /// Deprecated method to send a message, internally calls `send_proposal`.
     #[inline]
     #[deprecated]
     pub async fn send(&self, message: Vec<u8>) -> Result<Vec<u8>> {
         self.send_proposal(message).await
     }
 
+    /// Sends a query to the Raft node and returns the response data.
+    /// It sends a `Message::Query` containing the query bytes and waits for a response.
+    /// On success, it returns the data wrapped in `RaftResponse::Response`.
     #[inline]
     pub async fn query(&self, query: Vec<u8>) -> Result<Vec<u8>> {
         let (tx, rx) = oneshot::channel();
@@ -187,6 +198,8 @@ impl Mailbox {
         }
     }
 
+    /// Sends a request to leave the Raft cluster.
+    /// It initiates a `ConfigChange` to remove the node from the cluster and waits for a response.
     #[inline]
     pub async fn leave(&self) -> Result<()> {
         let mut change = ConfChange::default();
@@ -205,6 +218,8 @@ impl Mailbox {
         }
     }
 
+    /// Retrieves the current status of the Raft node.
+    /// Sends a `Message::Status` request and waits for a `RaftResponse::Status` reply, which contains the node's status.
     #[inline]
     pub async fn status(&self) -> Result<Status> {
         let (tx, rx) = oneshot::channel();
@@ -219,6 +234,8 @@ impl Mailbox {
         }
     }
 
+    /// Retrieves leader information, including whether the current node is the leader, the leader ID, and its address.
+    /// This method sends a `Message::RequestId` and waits for a response with the leader's ID and address.
     #[inline]
     async fn get_leader_info(&self) -> Result<(bool, u64, Option<String>)> {
         let (tx, rx) = oneshot::channel();
@@ -248,7 +265,8 @@ pub struct Raft<S: Store + 'static> {
 }
 
 impl<S: Store + Send + Sync + 'static> Raft<S> {
-    /// creates a new node with the given address and store.
+    /// Creates a new Raft node with the provided address, store, logger, and configuration.
+    /// The node communicates with other peers using a mailbox.
     pub fn new<A: ToSocketAddrs>(
         laddr: A,
         store: S,
@@ -271,7 +289,7 @@ impl<S: Store + Send + Sync + 'static> Raft<S> {
         })
     }
 
-    /// gets the node's `Mailbox`.
+    /// Returns a `Mailbox` for the Raft node, which facilitates communication with peers.
     pub fn mailbox(&self) -> Mailbox {
         Mailbox {
             peers: Arc::new(DashMap::default()),
@@ -284,7 +302,8 @@ impl<S: Store + Send + Sync + 'static> Raft<S> {
         }
     }
 
-    /// find leader id and leader address
+    /// Finds leader information by querying a list of peer addresses.
+    /// Returns the leader ID and its address if found.
     pub async fn find_leader_info(&self, peer_addrs: Vec<String>) -> Result<Option<(u64, String)>> {
         let mut futs = Vec::new();
         for addr in peer_addrs {
@@ -311,6 +330,8 @@ impl<S: Store + Send + Sync + 'static> Raft<S> {
         }
     }
 
+    /// Requests the leader information from a specific peer.
+    /// Sends a `Message::RequestId` to the peer and waits for the response.
     async fn request_leader(&self, peer_addr: String) -> Result<Option<(u64, String)>> {
         let (leader_id, leader_addr): (u64, String) = {
             let mut client = connect(
@@ -340,8 +361,18 @@ impl<S: Store + Send + Sync + 'static> Raft<S> {
         Ok(Some((leader_id, leader_addr)))
     }
 
-    /// Create a new leader for the cluster, with id 1. There has to be exactly one node in the
-    /// cluster that is initialised that way
+    /// The `lead` function transitions the current node to the leader role in a Raft cluster.
+    /// It initializes the leader node and runs both the Raft server and the node concurrently.
+    /// The function will return once the server or node experiences an error, or when the leader
+    /// role is relinquished.
+    ///
+    /// # Arguments
+    ///
+    /// * `node_id` - The unique identifier for the node.
+    ///
+    /// # Returns
+    ///
+    /// A `Result<()>` indicating success or failure during the process.
     pub async fn lead(self, node_id: u64) -> Result<()> {
         let node = RaftNode::new_leader(
             self.rx,
@@ -376,6 +407,20 @@ impl<S: Store + Send + Sync + 'static> Raft<S> {
         Ok(())
     }
 
+    /// The `join` function is used to make the current node join an existing Raft cluster.
+    /// It tries to discover the current leader, communicates with the leader to join the cluster,
+    /// and configures the node as a follower.
+    ///
+    /// # Arguments
+    ///
+    /// * `node_id` - The unique identifier for the current node.
+    /// * `node_addr` - The address of the current node.
+    /// * `leader_id` - The optional leader node's identifier (if already known).
+    /// * `leader_addr` - The address of the leader node.
+    ///
+    /// # Returns
+    ///
+    /// A `Result<()>` indicating success or failure during the joining process.
     pub async fn join(
         self,
         node_id: u64,
@@ -429,7 +474,7 @@ impl<S: Store + Send + Sync + 'static> Raft<S> {
 
         info!(
             "change_remove raft_response: {:?}",
-            deserialize(&raft_response.inner)?
+            deserialize::<RaftResponse>(&raft_response.inner)?
         );
 
         // 3. Join the cluster

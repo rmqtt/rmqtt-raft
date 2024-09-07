@@ -157,6 +157,22 @@ pub struct Peer {
 }
 
 impl Peer {
+    /// Creates a new `Peer` instance with the specified parameters.
+    ///
+    /// # Parameters
+    /// - `addr`: The address of the peer to connect to.
+    /// - `crw_timeout`: The timeout duration for connection and read/write operations.
+    /// - `concurrency_limit`: The maximum number of concurrent gRPC requests allowed.
+    /// - `grpc_message_size`: The maximum size of a gRPC message.
+    /// - `grpc_breaker_threshold`: The threshold for the number of gRPC failures before breaking the circuit.
+    /// - `grpc_breaker_retry_interval`: The time interval for retrying after the circuit breaker is tripped.
+    ///
+    /// # Returns
+    /// - A new `Peer` instance with the provided configuration.
+    ///
+    /// # Behavior
+    /// - Initializes internal state, including counters and timeouts.
+    /// - Logs the connection attempt to the specified address.
     pub fn new(
         addr: String,
         crw_timeout: Duration,
@@ -180,16 +196,39 @@ impl Peer {
         }
     }
 
+    /// Returns the number of currently active tasks associated with this peer.
+    ///
+    /// # Returns
+    /// - The number of active tasks as an `i64`.
+    ///
+    /// # Behavior
+    /// - Reads the value of the `active_tasks` counter.
     #[inline]
     pub fn active_tasks(&self) -> i64 {
         self.active_tasks.load(Ordering::SeqCst)
     }
 
+    /// Returns the number of gRPC failures encountered by this peer.
+    ///
+    /// # Returns
+    /// - The number of gRPC failures as a `u64`.
+    ///
+    /// # Behavior
+    /// - Reads the value of the `grpc_fails` counter.
     #[inline]
     pub fn grpc_fails(&self) -> u64 {
         self.grpc_fails.load(Ordering::SeqCst)
     }
 
+    /// Connects to the peer if not already connected, and returns the gRPC client.
+    ///
+    /// # Returns
+    /// - `Ok(RaftGrpcClient)`: On successful connection, returns the gRPC client.
+    /// - `Err(Error)`: On failure, returns an error.
+    ///
+    /// # Behavior
+    /// - Checks if the gRPC client is already connected and available.
+    /// - If not, attempts to establish a new connection and store the client.
     #[inline]
     async fn connect(&self) -> Result<RaftGrpcClient> {
         if let Some(c) = self.client.read().await.as_ref() {
@@ -212,12 +251,32 @@ impl Peer {
         Ok(c)
     }
 
+    /// Retrieves the gRPC client by establishing a connection if needed.
+    ///
+    /// # Returns
+    /// - `Ok(RaftGrpcClient)`: On successful connection, returns the gRPC client.
+    /// - `Err(Error)`: On failure, returns an error.
+    ///
+    /// # Behavior
+    /// - Calls `connect` to ensure the client is connected and available.
     #[inline]
     pub async fn client(&self) -> Result<RaftGrpcClient> {
         self.connect().await
     }
 
-    ///Raft Message
+    /// Sends a Raft message to the peer and waits for a response.
+    ///
+    /// # Parameters
+    /// - `msg`: The Raft message to be sent.
+    ///
+    /// # Returns
+    /// - `Ok(Vec<u8>)`: On successful message send, returns the response data as a byte vector.
+    /// - `Err(Error)`: On failure, returns an error.
+    ///
+    /// # Behavior
+    /// - Checks if the peer is available for sending messages.
+    /// - Encodes the message and sends it using the `_send_message` method.
+    /// - Updates the active task count and records success or failure.
     #[inline]
     pub async fn send_message(&self, msg: &RaftMessage) -> Result<Vec<u8>> {
         if !self.available() {
@@ -257,6 +316,19 @@ impl Peer {
         Ok(result)
     }
 
+    /// Sends a Raft proposal to the peer and waits for a response.
+    ///
+    /// # Parameters
+    /// - `msg`: The Raft proposal to be sent as a byte vector.
+    ///
+    /// # Returns
+    /// - `Ok(Vec<u8>)`: On successful proposal send, returns the response data as a byte vector.
+    /// - `Err(Error)`: On failure, returns an error.
+    ///
+    /// # Behavior
+    /// - Checks if the peer is available for sending proposals.
+    /// - Wraps the proposal in a `RraftProposal` and sends it using the `_send_proposal` method.
+    /// - Updates the active task count and records success or failure.
     #[inline]
     pub async fn send_proposal(&self, msg: Vec<u8>) -> Result<Vec<u8>> {
         if !self.available() {
@@ -296,24 +368,19 @@ impl Peer {
     }
 
     #[inline]
-    pub fn _addr(&self) -> &str {
-        &self.addr
-    }
-
-    #[inline]
-    pub fn record_failure(&self) {
+    fn record_failure(&self) {
         self.grpc_fails.fetch_add(1, Ordering::SeqCst);
         self.grpc_fail_time
             .store(chrono::Local::now().timestamp_millis(), Ordering::SeqCst);
     }
 
     #[inline]
-    pub fn record_success(&self) {
+    fn record_success(&self) {
         self.grpc_fails.store(0, Ordering::SeqCst);
     }
 
     #[inline]
-    pub fn available(&self) -> bool {
+    fn available(&self) -> bool {
         self.grpc_fails.load(Ordering::SeqCst) < self.grpc_breaker_threshold
             || (chrono::Local::now().timestamp_millis()
                 - self.grpc_fail_time.load(Ordering::SeqCst))
@@ -336,6 +403,21 @@ pub struct RaftNode<S: Store> {
 }
 
 impl<S: Store + 'static> RaftNode<S> {
+    /// Creates a new leader node for the Raft cluster.
+    ///
+    /// This function initializes a new `RaftNode` instance as a leader. It sets up the Raft configuration,
+    /// applies a default snapshot to initialize the state, and sets the node to be a leader.
+    ///
+    /// # Parameters
+    /// - `rcv`: A receiver for Raft messages. This will be used to receive incoming messages.
+    /// - `snd`: A sender for Raft messages. This will be used to send outgoing messages.
+    /// - `id`: The unique identifier for this Raft node.
+    /// - `store`: The store implementation used for persisting Raft state.
+    /// - `logger`: A logger instance for logging messages related to the Raft node.
+    /// - `cfg`: Configuration for the Raft node, including various timeouts and limits.
+    ///
+    /// # Returns
+    /// Returns a `Result` containing either the newly created `RaftNode` or an error if the creation failed.
     pub fn new_leader(
         rcv: mpsc::Receiver<Message>,
         snd: mpsc::Sender<Message>,
@@ -385,6 +467,21 @@ impl<S: Store + 'static> RaftNode<S> {
         Ok(node)
     }
 
+    /// Creates a new follower node for the Raft cluster.
+    ///
+    /// This function initializes a new `RaftNode` instance as a follower. It sets up the Raft configuration
+    /// and creates a new `RawNode` instance in follower mode.
+    ///
+    /// # Parameters
+    /// - `rcv`: A receiver for Raft messages. This will be used to receive incoming messages.
+    /// - `snd`: A sender for Raft messages. This will be used to send outgoing messages.
+    /// - `id`: The unique identifier for this Raft node.
+    /// - `store`: The store implementation used for persisting Raft state.
+    /// - `logger`: A logger instance for logging messages related to the Raft node.
+    /// - `cfg`: Configuration for the Raft node, including various timeouts and limits.
+    ///
+    /// # Returns
+    /// Returns a `Result` containing either the newly created `RaftNode` or an error if the creation failed.
     pub fn new_follower(
         rcv: mpsc::Receiver<Message>,
         snd: mpsc::Sender<Message>,
@@ -420,6 +517,16 @@ impl<S: Store + 'static> RaftNode<S> {
         })
     }
 
+    /// Creates a new Raft configuration with the specified node ID.
+    ///
+    /// This function clones the provided configuration and sets the node ID.
+    ///
+    /// # Parameters
+    /// - `id`: The unique identifier for the Raft node.
+    /// - `cfg`: The base Raft configuration to clone and modify.
+    ///
+    /// # Returns
+    /// Returns a `RaftConfig` with the updated node ID.
     #[inline]
     fn new_config(id: u64, cfg: &RaftConfig) -> RaftConfig {
         let mut cfg = cfg.clone();
@@ -427,6 +534,15 @@ impl<S: Store + 'static> RaftNode<S> {
         cfg
     }
 
+    /// Retrieves a peer by its ID.
+    ///
+    /// This function looks up a peer in the `peers` map by its ID.
+    ///
+    /// # Parameters
+    /// - `id`: The ID of the peer to retrieve.
+    ///
+    /// # Returns
+    /// Returns an `Option<Peer>`. If the peer is found, it is returned; otherwise, `None` is returned.
     #[inline]
     pub fn peer(&self, id: u64) -> Option<Peer> {
         match self.peers.get(&id) {
@@ -435,16 +551,39 @@ impl<S: Store + 'static> RaftNode<S> {
         }
     }
 
+    /// Checks if the current node is the leader.
+    ///
+    /// This function compares the leader ID of the Raft instance with the current node's ID.
+    ///
+    /// # Returns
+    /// Returns `true` if the current node is the leader, otherwise `false`.
     #[inline]
     pub fn is_leader(&self) -> bool {
         self.inner.raft.leader_id == self.inner.raft.id
     }
 
+    /// Retrieves the ID of the current node.
+    ///
+    /// This function returns the unique identifier of the current Raft node.
+    ///
+    /// # Returns
+    /// Returns the node's ID as a `u64`.
     #[inline]
     pub fn id(&self) -> u64 {
         self.raft.id
     }
 
+    /// Adds a new peer to the `peers` map.
+    ///
+    /// This function creates a new `Peer` instance with the specified address and configuration,
+    /// and adds it to the `peers` map.
+    ///
+    /// # Parameters
+    /// - `addr`: The address of the new peer.
+    /// - `id`: The unique identifier for the new peer.
+    ///
+    /// # Returns
+    /// Returns the newly created `Peer` instance.
     #[inline]
     pub fn add_peer(&mut self, addr: &str, id: u64) -> Peer {
         let peer = Peer::new(
@@ -590,7 +729,7 @@ impl<S: Store + 'static> RaftNode<S> {
         }
     }
 
-    pub async fn run(mut self) -> Result<()> {
+    pub(crate) async fn run(mut self) -> Result<()> {
         let mut heartbeat = self.cfg.heartbeat;
         let mut now = Instant::now();
         let mut snapshot_received = self.is_leader();
