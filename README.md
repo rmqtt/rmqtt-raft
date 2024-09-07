@@ -16,7 +16,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-rmqtt-raft = "0.3"
+rmqtt-raft = "0.4"
 ```
 
 ## Getting started
@@ -26,7 +26,6 @@ which is a thread-safe wrapper around an
 `HashMap`:
 
 ```rust
-/// convienient data structure to pass Message in the raft
 #[derive(Serialize, Deserialize)]
 pub enum Message {
     Insert { key: String, value: String },
@@ -102,19 +101,43 @@ Only 4 methods need to be implemented for the Store:
 ```rust
 #[tokio::main]
 async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
-    
+    let decorator = slog_term::TermDecorator::new().build();
+    let drain = slog_term::FullFormat::new(decorator).build().fuse();
+    let drain = slog_async::Async::new(drain).build().fuse();
+    let logger = slog::Logger::root(drain, slog_o!("version" => env!("CARGO_PKG_VERSION")));
+
+    // converts log to slog
+    #[allow(clippy::let_unit_value)]
+        let _log_guard = slog_stdlog::init().unwrap();
+
+    let options = Options::from_args();
     let store = HashStore::new();
+    info!(logger, "peer_addrs: {:?}", options.peer_addrs);
     let cfg = Config {
+        reuseaddr: true,
+        reuseport: true,
+        // grpc_message_size: 50 * 1024 * 1024,
         ..Default::default()
     };
-    let raft = Raft::new(options.raft_laddr, store.clone(), logger.clone(), cfg)?;
+    let raft = Raft::new(
+        options.raft_laddr.clone(),
+        store.clone(),
+        logger.clone(),
+        cfg,
+    )?;
     let leader_info = raft.find_leader_info(options.peer_addrs).await?;
+    info!(logger, "leader_info: {:?}", leader_info);
 
     let mailbox = Arc::new(raft.mailbox());
     let (raft_handle, mailbox) = match leader_info {
         Some((leader_id, leader_addr)) => {
             info!(logger, "running in follower mode");
-            let handle = tokio::spawn(raft.join(options.id, Some(leader_id), leader_addr));
+            let handle = tokio::spawn(raft.join(
+                options.id,
+                options.raft_laddr,
+                Some(leader_id),
+                leader_addr,
+            ));
             (handle, mailbox)
         }
         None => {
@@ -123,11 +146,10 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             (handle, mailbox)
         }
     };
-
+    
     tokio::try_join!(raft_handle)?.0?;
     Ok(())
 }
-
 ```
 
 The `mailbox` gives you a way to interact with the raft, for sending a message, or leaving the cluster for example.
