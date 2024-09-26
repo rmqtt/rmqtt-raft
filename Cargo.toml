@@ -1,6 +1,6 @@
 [package]
 name = "rmqtt-raft"
-version = "0.4.2"
+version = "0.4.3"
 authors = ["rmqtt <rmqttd@126.com>"]
 edition = "2021"
 license = "MIT OR Apache-2.0"
@@ -24,7 +24,7 @@ reuseaddr = ["socket2", "tokio-stream"]
 tikv-raft = { package = "raft", version = "0.7", features = [
     "prost-codec",
 ], default-features = false }
-tokio = { version = "1", default-features = false }
+tokio = { version = "1", default-features = false, features = ["macros"] }
 socket2 = { version = "0.5", features = ["all"], optional = true }
 tokio-stream = { version = "0.1", features = ["net"], optional = true }
 tonic = "0.9"
@@ -36,7 +36,7 @@ serde = { version = "1.0", features = ["derive"] }
 log = { version = "0.4", features = ["std"] }
 slog = "2"
 thiserror = "1.0"
-dashmap = "5.5"
+dashmap = "6.1"
 ahash = "0.8"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 anyhow = "1.0"
