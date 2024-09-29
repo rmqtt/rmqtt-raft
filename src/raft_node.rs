@@ -916,7 +916,10 @@ impl<S: Store + 'static> RaftNode<S> {
             let snapshot = ready.snapshot();
             self.store.restore(snapshot.get_data()).await?;
             let store = self.mut_store();
-            store.apply_snapshot(snapshot.clone())?;
+            store.apply_snapshot(Snapshot {
+                metadata: Some(snapshot.get_metadata().clone()),
+                ..Default::default()
+            })?;
         }
 
         self.handle_committed_entries(ready.take_committed_entries())
