@@ -1039,17 +1039,28 @@ impl<S: Store + 'static> RaftNode<S> {
                     self.peers.remove(&change.get_node_id());
                 }
             }
-            _ => unimplemented!(),
+            _ => {
+                warn!("unimplemented! change_type: {:?}", change_type);
+            }
         }
 
         if let Ok(cs) = self.apply_conf_change(&change) {
             let last_applied = self.raft.raft_log.applied;
-            let snapshot = prost::bytes::Bytes::from(self.store.snapshot().await?);
-            {
+            if matches!(change_type, ConfChangeType::AddNode) {
+                self.last_snap_time = Instant::now();
+                let snapshot = prost::bytes::Bytes::from(self.store.snapshot().await?);
+                info!(
+                    "create snapshot cost time: {:?}",
+                    self.last_snap_time.elapsed(),
+                );
                 let store = self.mut_store();
                 store.set_conf_state(&cs)?;
                 store.compact(last_applied)?;
                 store.create_snapshot(snapshot)?;
+            } else {
+                let store = self.mut_store();
+                store.set_conf_state(&cs)?;
+                store.compact(last_applied)?;
             }
         }
 
@@ -1060,7 +1071,10 @@ impl<S: Store + 'static> RaftNode<S> {
                     peer_addrs: self.peer_addrs(),
                 },
                 ConfChangeType::RemoveNode => RaftResponse::Ok,
-                _ => unimplemented!(),
+                _ => {
+                    warn!("unimplemented! change_type: {:?}", change_type);
+                    RaftResponse::Error("unimplemented".into())
+                }
             };
             if let ReplyChan::One((sender, _)) = sender {
                 if sender.send(response).is_err() {
@@ -1159,7 +1173,7 @@ impl<S: Store + 'static> RaftNode<S> {
             let result = store.create_snapshot(snapshot);
             info!(
                 "create snapshot cost time: {:?}, first_index: {:?}, last_index: {:?}, {}, create snapshot result: {:?}",
-                Instant::now() - self.last_snap_time,
+                self.last_snap_time.elapsed(),
                 first_index,
                 last_index,
                 (last_index as i64 - first_index as i64),
