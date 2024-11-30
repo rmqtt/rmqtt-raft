@@ -1,9 +1,14 @@
+use bytestring::ByteString;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use futures::channel::oneshot::Sender;
+use serde::de::{self, Deserializer};
+use serde::ser::Serializer;
 use serde::{Deserialize, Serialize};
+
+use futures::channel::oneshot::Sender;
 use tikv_raft::eraftpb::{ConfChange, Message as RaftMessage};
+use tikv_raft::StateRole;
 
 /// Enumeration representing various types of responses that can be sent back to clients.
 #[derive(Serialize, Deserialize, Debug)]
@@ -58,6 +63,12 @@ pub enum Message {
     Status { chan: Sender<RaftResponse> },
 }
 
+#[derive(Serialize, Deserialize, Debug)]
+pub struct PeerState {
+    pub addr: ByteString,
+    pub available: bool,
+}
+
 /// Struct representing the status of the system.
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Status {
@@ -66,7 +77,12 @@ pub struct Status {
     pub uncommitteds: usize,
     pub merger_proposals: usize,
     pub sending_raft_messages: isize,
-    pub peers: HashMap<u64, String>,
+    pub peers: HashMap<u64, Option<PeerState>>,
+    #[serde(
+        serialize_with = "Status::serialize_role",
+        deserialize_with = "Status::deserialize_role"
+    )]
+    pub role: StateRole,
 }
 
 impl Status {
@@ -80,6 +96,35 @@ impl Status {
     #[inline]
     pub fn is_leader(&self) -> bool {
         self.leader_id == self.id
+    }
+
+    #[inline]
+    pub fn deserialize_role<'de, D>(deserializer: D) -> Result<StateRole, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let role = match u8::deserialize(deserializer)? {
+            1 => StateRole::Follower,
+            2 => StateRole::Candidate,
+            3 => StateRole::Leader,
+            4 => StateRole::PreCandidate,
+            _ => return Err(de::Error::missing_field("role")),
+        };
+        Ok(role)
+    }
+
+    #[inline]
+    pub fn serialize_role<S>(role: &StateRole, s: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match role {
+            StateRole::Follower => 1u8,
+            StateRole::Candidate => 2u8,
+            StateRole::Leader => 3u8,
+            StateRole::PreCandidate => 4u8,
+        }
+        .serialize(s)
     }
 }
 

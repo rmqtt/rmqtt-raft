@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bincode::{deserialize, serialize};
+use bytestring::ByteString;
 use futures::channel::{mpsc, oneshot};
 use futures::SinkExt;
 use futures::StreamExt;
@@ -17,7 +18,7 @@ use tokio::time::timeout;
 use tonic::Request;
 
 use crate::error::{Error, Result};
-use crate::message::{Merger, Message, Proposals, RaftResponse, ReplyChan, Status};
+use crate::message::{Merger, Message, PeerState, Proposals, RaftResponse, ReplyChan, Status};
 use crate::raft::Store;
 use crate::raft_service::raft_service_client::RaftServiceClient;
 use crate::raft_service::{connect, Message as RraftMessage, Proposal as RraftProposal, Query};
@@ -144,7 +145,7 @@ impl QuerySender {
 
 #[derive(Clone)]
 pub struct Peer {
-    addr: String,
+    addr: ByteString,
     client: Arc<RwLock<Option<RaftGrpcClient>>>,
     grpc_fails: Arc<AtomicU64>,
     grpc_fail_time: Arc<AtomicI64>,
@@ -183,7 +184,7 @@ impl Peer {
     ) -> Peer {
         debug!("connecting to node at {}...", addr);
         Peer {
-            addr,
+            addr: addr.into(),
             client: Arc::new(RwLock::new(None)),
             grpc_fails: Arc::new(AtomicU64::new(0)),
             grpc_fail_time: Arc::new(AtomicI64::new(0)),
@@ -377,6 +378,11 @@ impl Peer {
     #[inline]
     fn record_success(&self) {
         self.grpc_fails.store(0, Ordering::SeqCst);
+    }
+
+    #[inline]
+    pub(crate) fn is_unavailable(&self) -> bool {
+        self.grpc_fails.load(Ordering::SeqCst) >= self.grpc_breaker_threshold
     }
 
     #[inline]
@@ -620,8 +626,28 @@ impl<S: Store + 'static> RaftNode<S> {
     }
 
     #[inline]
+    fn peer_states(&self) -> HashMap<u64, Option<PeerState>> {
+        self.peers
+            .iter()
+            .map(|(id, peer)| {
+                if let Some(p) = peer {
+                    (
+                        *id,
+                        Some(PeerState {
+                            addr: p.addr.clone(),
+                            available: !p.is_unavailable(),
+                        }),
+                    )
+                } else {
+                    (*id, None)
+                }
+            })
+            .collect()
+    }
+
+    #[inline]
     fn status(&self, merger_proposals: usize) -> Status {
-        debug!("raft status.ss: {:?}", self.inner.status().ss);
+        let role = self.raft.state;
         let leader_id = self.raft.leader_id;
         let sending_raft_messages = self.sending_raft_messages.load(Ordering::SeqCst);
         Status {
@@ -630,7 +656,8 @@ impl<S: Store + 'static> RaftNode<S> {
             uncommitteds: self.uncommitteds.len(),
             merger_proposals,
             sending_raft_messages,
-            peers: self.peer_addrs(),
+            peers: self.peer_states(),
+            role,
         }
     }
 
@@ -679,7 +706,7 @@ impl<S: Store + 'static> RaftNode<S> {
         let leader_addr = self
             .peers
             .get(&leader_id)
-            .and_then(|peer| peer.as_ref().map(|p| p.addr.clone()));
+            .and_then(|peer| peer.as_ref().map(|p| p.addr.to_string()));
         let raft_response = RaftResponse::WrongLeader {
             leader_id,
             leader_addr,
