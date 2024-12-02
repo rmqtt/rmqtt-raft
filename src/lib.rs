@@ -4,7 +4,7 @@ use std::time::Duration;
 pub use crate::error::{Error, Result};
 pub use crate::message::Status;
 pub use crate::raft::{Mailbox, Raft, Store};
-pub use tikv_raft::ReadOnlyOption;
+pub use tikv_raft::{ReadOnlyOption, StateRole};
 
 // Importing modules for internal use.
 mod error;
