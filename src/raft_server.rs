@@ -160,12 +160,13 @@ impl RaftService for RaftServer {
 
         match timeout(self.timeout, rx).await {
             Ok(Ok(raft_response)) => {
-                reply.inner = serialize(&raft_response).expect("serialize error");
+                reply.inner =
+                    serialize(&raft_response).map_err(|e| Status::unavailable(e.to_string()))?;
             }
             Ok(_) => (),
             Err(e) => {
-                reply.inner =
-                    serialize(&RaftResponse::Error("timeout".into())).expect("serialize error");
+                reply.inner = serialize(&RaftResponse::Error("timeout".into()))
+                    .map_err(|e| Status::unavailable(e.to_string()))?;
                 warn!("timeout waiting for reply, {:?}", e);
             }
         }
@@ -268,23 +269,24 @@ impl RaftService for RaftServer {
                 // if we don't receive a response after 2secs, we timeout
                 match timeout(self.timeout, rx).await {
                     Ok(Ok(raft_response)) => {
-                        reply.inner = serialize(&raft_response).expect("serialize error");
+                        reply.inner = serialize(&raft_response)
+                            .map_err(|e| Status::unavailable(e.to_string()))?;
                     }
                     Ok(Err(e)) => {
                         reply.inner = serialize(&RaftResponse::Error(e.to_string()))
-                            .expect("serialize error");
+                            .map_err(|e| Status::unavailable(e.to_string()))?;
                         warn!("send query error, {}", e);
                     }
                     Err(_e) => {
                         reply.inner = serialize(&RaftResponse::Error("timeout".into()))
-                            .expect("serialize error");
+                            .map_err(|e| Status::unavailable(e.to_string()))?;
                         warn!("timeout waiting for send query reply");
                     }
                 }
             }
             Err(e) => {
-                reply.inner =
-                    serialize(&RaftResponse::Error(e.to_string())).expect("serialize error");
+                reply.inner = serialize(&RaftResponse::Error(e.to_string()))
+                    .map_err(|e| Status::unavailable(e.to_string()))?;
                 warn!("send query error, {}", e)
             }
         }

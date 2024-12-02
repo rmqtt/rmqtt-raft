@@ -54,8 +54,8 @@ impl MessageSender {
                         tokio::time::sleep(self.timeout).await;
                     } else {
                         warn!(
-                            "error sending message after {}/{} retries: {:?}",
-                            current_retry, self.max_retries, e
+                            "error sending message after {}/{} retries: {:?}, target addr: {:?}",
+                            current_retry, self.max_retries, e, self.client.addr
                         );
                         if let Err(e) = self
                             .chan
@@ -65,8 +65,8 @@ impl MessageSender {
                             .await
                         {
                             warn!(
-                                "error ReportUnreachable after {}/{} retries: {:?}",
-                                current_retry, self.max_retries, e
+                                "error ReportUnreachable after {}/{} retries: {:?}, target addr: {:?}",
+                                current_retry, self.max_retries, e, self.client.addr
                             );
                         }
                         self.sending_raft_messages.fetch_sub(1, Ordering::SeqCst);
@@ -93,11 +93,14 @@ impl QuerySender {
         let mut client = match self.client.client().await {
             Ok(c) => c,
             Err(e) => {
-                warn!("error sending query after, {:?}", e);
+                warn!(
+                    "error sending query after, {:?}, target addr: {:?}",
+                    e, self.client.addr
+                );
                 if let Err(e) = self.chan.send(RaftResponse::Error(e.to_string())) {
                     warn!(
-                        "send_query, Message::Query, RaftResponse send error: {:?}",
-                        e
+                        "send_query, Message::Query, RaftResponse send error: {:?}, target addr: {:?}",
+                        e, self.client.addr
                     );
                 }
                 return;
@@ -110,12 +113,20 @@ impl QuerySender {
             });
             match client.send_query(message_request).await {
                 Ok(grpc_response) => {
-                    let raft_response =
-                        deserialize(&grpc_response.into_inner().inner).expect("deserialize error");
+                    let raft_response = match deserialize(&grpc_response.into_inner().inner) {
+                        Ok(resp) => resp,
+                        Err(e) => {
+                            warn!(
+                                    "send_query, Message::Query, RaftResponse deserialize error: {:?}, target addr: {:?}",
+                                    e, self.client.addr
+                                );
+                            return;
+                        }
+                    };
                     if let Err(e) = self.chan.send(raft_response) {
                         warn!(
-                            "send_query, Message::Query, RaftResponse send error: {:?}",
-                            e
+                            "send_query, Message::Query, RaftResponse send error: {:?}, target addr: {:?}",
+                            e, self.client.addr
                         );
                     }
                     return;
@@ -126,13 +137,13 @@ impl QuerySender {
                         tokio::time::sleep(self.timeout).await;
                     } else {
                         warn!(
-                            "error sending query after {} retries: {}",
-                            self.max_retries, e
+                            "error sending query after {} retries: {}, target addr: {:?}",
+                            self.max_retries, e, self.client.addr
                         );
                         if let Err(e) = self.chan.send(RaftResponse::Error(e.to_string())) {
                             warn!(
-                                "send_query, Message::Query, RaftResponse send error: {:?}",
-                                e
+                                "send_query, Message::Query, RaftResponse send error: {:?}, target addr: {:?}",
+                                e, self.client.addr
                             );
                         }
                         return;
