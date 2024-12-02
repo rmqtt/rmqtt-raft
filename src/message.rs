@@ -63,14 +63,14 @@ pub enum Message {
     Status { chan: Sender<RaftResponse> },
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct PeerState {
     pub addr: ByteString,
     pub available: bool,
 }
 
 /// Struct representing the status of the system.
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Status {
     pub id: u64,
     pub leader_id: u64,
@@ -86,6 +86,57 @@ pub struct Status {
 }
 
 impl Status {
+    #[inline]
+    pub fn available(&self) -> bool {
+        if matches!(self.role, StateRole::Leader) {
+            //Check if the number of available nodes is greater than or equal to half of the total nodes.
+            let (all_count, available_count) = self.get_count();
+            let available = available_count >= ((all_count / 2) + (all_count % 2));
+            log::debug!(
+                "is Leader, all_count: {}, available_count: {} {}",
+                all_count,
+                available_count,
+                available
+            );
+            available
+        } else if self.leader_id > 0 {
+            //As long as a leader exists and is available, the system considers itself in a normal state.
+            let available = self
+                .peers
+                .get(&self.leader_id)
+                .and_then(|p| p.as_ref().map(|p| p.available))
+                .unwrap_or_default();
+            log::debug!("has Leader, available: {}", available);
+            available
+        } else {
+            //If there is no Leader, it's still necessary to check whether the number of all other
+            // available nodes is greater than or equal to half.
+            let (all_count, available_count) = self.get_count();
+            let available = available_count >= ((all_count / 2) + (all_count % 2));
+            log::debug!(
+                "no Leader, all_count: {}, available_count: {} {}",
+                all_count,
+                available_count,
+                available
+            );
+            available
+        }
+    }
+
+    #[inline]
+    fn get_count(&self) -> (usize, usize) {
+        let available_count = self
+            .peers
+            .iter()
+            .filter(|(_, p)| if let Some(p) = p { p.available } else { false })
+            .count();
+        if self.peers.contains_key(&self.id) {
+            (self.peers.len() - 1, available_count - 1)
+        } else {
+            (self.peers.len(), available_count)
+        }
+    }
+
     /// Checks if the node has started.
     #[inline]
     pub fn is_started(&self) -> bool {
@@ -95,7 +146,7 @@ impl Status {
     /// Checks if this node is the leader.
     #[inline]
     pub fn is_leader(&self) -> bool {
-        self.leader_id == self.id
+        self.leader_id == self.id && matches!(self.role, StateRole::Leader)
     }
 
     #[inline]
