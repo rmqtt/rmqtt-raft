@@ -27,6 +27,8 @@ pub enum RaftResponse {
     RequestId { leader_id: u64 },
     /// Represents an error with a message.
     Error(String),
+    /// Too busy
+    Busy,
     /// Contains arbitrary response data.
     Response { data: Vec<u8> },
     /// Represents the status of the system.
@@ -77,6 +79,10 @@ pub struct Status {
     pub uncommitteds: usize,
     pub merger_proposals: usize,
     pub sending_raft_messages: isize,
+    pub timeout_max: isize,
+    pub timeout_recent_count: isize,
+    pub propose_count: isize,
+    pub propose_rate: f64,
     pub peers: HashMap<u64, Option<PeerState>>,
     #[serde(
         serialize_with = "Status::serialize_role",

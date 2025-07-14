@@ -1,6 +1,6 @@
 [package]
 name = "rmqtt-raft"
-version = "0.4.5"
+version = "0.4.6"
 authors = ["rmqtt <rmqttd@126.com>"]
 edition = "2021"
 license = "MIT OR Apache-2.0"
@@ -42,6 +42,8 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 anyhow = "1.0"
 once_cell = "1"
 bytestring = { version = "1.3", features = ["serde"] }
+scopeguard = "1"
+box-counter = { version = "0.3", features = ["count", "rate"] }
 
 [build-dependencies]
 tonic-build = "0.9"

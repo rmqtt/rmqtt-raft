@@ -4,12 +4,14 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use bincode::{deserialize, serialize};
+use bytestring::ByteString;
 use futures::channel::{mpsc, oneshot};
 use futures::future::FutureExt;
 use futures::SinkExt;
 use log::{debug, info, warn};
 use prost::Message as _;
 use tikv_raft::eraftpb::{ConfChange, ConfChangeType};
+use tokio::sync::RwLock;
 use tokio::time::timeout;
 use tonic::Request;
 
@@ -51,6 +53,15 @@ impl ProposalSender {
     }
 }
 
+#[derive(Clone)]
+struct LeaderInfo {
+    leader: bool,
+    target_leader_id: u64,
+    target_leader_addr: Option<String>,
+}
+
+type LeaderInfoError = ByteString;
+
 /// A mailbox to send messages to a running raft node.
 #[derive(Clone)]
 pub struct Mailbox {
@@ -61,9 +72,41 @@ pub struct Mailbox {
     grpc_message_size: usize,
     grpc_breaker_threshold: u64,
     grpc_breaker_retry_interval: i64,
+    #[allow(clippy::type_complexity)]
+    leader_info: Arc<
+        RwLock<
+            Option<(
+                Option<LeaderInfo>,
+                Option<LeaderInfoError>,
+                std::time::Instant,
+            )>,
+        >,
+    >,
 }
 
 impl Mailbox {
+    #[inline]
+    pub(crate) fn new(
+        peers: Arc<DashMap<(u64, String), Peer>>,
+        sender: mpsc::Sender<Message>,
+        grpc_timeout: Duration,
+        grpc_concurrency_limit: usize,
+        grpc_message_size: usize,
+        grpc_breaker_threshold: u64,
+        grpc_breaker_retry_interval: i64,
+    ) -> Self {
+        Self {
+            peers,
+            sender,
+            grpc_timeout,
+            grpc_concurrency_limit,
+            grpc_message_size,
+            grpc_breaker_threshold,
+            grpc_breaker_retry_interval,
+            leader_info: Arc::new(RwLock::new(None)),
+        }
+    }
+
     /// Retrieves a list of peers with their IDs.
     /// This method returns a vector containing tuples of peer IDs and their respective `Peer` objects.
     /// It iterates over the internal `peers` map and collects the IDs and cloned `Peer` instances.
@@ -117,7 +160,7 @@ impl Mailbox {
     #[inline]
     pub async fn send_proposal(&self, message: Vec<u8>) -> Result<Vec<u8>> {
         match self.get_leader_info().await? {
-            (true, _, _) => {
+            LeaderInfo { leader: true, .. } => {
                 debug!("this node is leader");
                 let (tx, rx) = oneshot::channel();
                 let proposal = Message::Propose {
@@ -135,13 +178,20 @@ impl Mailbox {
                     .map_err(|e| Error::RecvError(e.to_string()))?;
                 match reply {
                     RaftResponse::Response { data } => return Ok(data),
+                    RaftResponse::Busy => return Err(Error::Busy),
+                    RaftResponse::Error(e) => return Err(Error::from(e)),
                     _ => {
                         warn!("Recv other raft response: {:?}", reply);
                         return Err(Error::Unknown);
                     }
                 }
             }
-            (false, target_leader_id, target_leader_addr) => {
+            LeaderInfo {
+                leader: false,
+                target_leader_id,
+                target_leader_addr,
+                ..
+            } => {
                 debug!(
                     "This node not is Leader, leader_id: {:?}, leader_addr: {:?}",
                     target_leader_id, target_leader_addr
@@ -161,6 +211,7 @@ impl Mailbox {
                             target_leader_id, target_leader_addr, leader_id, leader_addr);
                                 return Err(Error::NotLeader);
                             }
+                            RaftResponse::Busy => Err(Error::Busy),
                             RaftResponse::Error(e) => Err(Error::from(e)),
                             _ => {
                                 warn!("Recv other raft response, target_leader_id: {}, target_leader_addr: {:?}", target_leader_id, target_leader_addr);
@@ -237,21 +288,69 @@ impl Mailbox {
     /// Retrieves leader information, including whether the current node is the leader, the leader ID, and its address.
     /// This method sends a `Message::RequestId` and waits for a response with the leader's ID and address.
     #[inline]
-    async fn get_leader_info(&self) -> Result<(bool, u64, Option<String>)> {
+    async fn _get_leader_info(&self) -> std::result::Result<LeaderInfo, LeaderInfoError> {
         let (tx, rx) = oneshot::channel();
         let mut sender = self.sender.clone();
         match sender.send(Message::RequestId { chan: tx }).await {
             Ok(_) => match timeout(self.grpc_timeout, rx).await {
-                Ok(Ok(RaftResponse::RequestId { leader_id })) => Ok((true, leader_id, None)),
+                Ok(Ok(RaftResponse::RequestId { leader_id })) => Ok(LeaderInfo {
+                    leader: true,
+                    target_leader_id: leader_id,
+                    target_leader_addr: None,
+                }),
                 Ok(Ok(RaftResponse::WrongLeader {
                     leader_id,
                     leader_addr,
-                })) => Ok((false, leader_id, leader_addr)),
-                Ok(Ok(RaftResponse::Error(e))) => Err(Error::from(e)),
-                _ => Err(Error::Unknown),
+                })) => Ok(LeaderInfo {
+                    leader: false,
+                    target_leader_id: leader_id,
+                    target_leader_addr: leader_addr,
+                }),
+                Ok(Ok(RaftResponse::Error(e))) => Err(LeaderInfoError::from(e)),
+                _ => Err("Unknown".into()),
             },
-            Err(e) => Err(Error::SendError(e.to_string())),
+            Err(e) => Err(LeaderInfoError::from(e.to_string())),
         }
+    }
+
+    #[inline]
+    async fn get_leader_info(&self) -> Result<LeaderInfo> {
+        // if true {
+        //     return match self._get_leader_info().await {
+        //         Ok(leader_info) => Ok(leader_info),
+        //         Err(e) => {
+        //             let err = e.to_string().into();
+        //             Err(err)
+        //         }
+        //     };
+        // }
+        {
+            let leader_info = self.leader_info.read().await;
+            if let Some((leader_info, err, inst)) = leader_info.as_ref() {
+                if inst.elapsed().as_secs() < 5 {
+                    if let Some(leader_info) = leader_info {
+                        return Ok(leader_info.clone());
+                    }
+                    if let Some(err) = err {
+                        return Err(err.to_string().into());
+                    }
+                }
+            }
+        }
+
+        let mut write = self.leader_info.write().await;
+
+        return match self._get_leader_info().await {
+            Ok(leader_info) => {
+                write.replace((Some(leader_info.clone()), None, std::time::Instant::now()));
+                Ok(leader_info)
+            }
+            Err(e) => {
+                let err = e.to_string().into();
+                write.replace((None, Some(e), std::time::Instant::now()));
+                Err(err)
+            }
+        };
     }
 }
 
@@ -291,15 +390,15 @@ impl<S: Store + Send + Sync + 'static> Raft<S> {
 
     /// Returns a `Mailbox` for the Raft node, which facilitates communication with peers.
     pub fn mailbox(&self) -> Mailbox {
-        Mailbox {
-            peers: Arc::new(DashMap::default()),
-            sender: self.tx.clone(),
-            grpc_timeout: self.cfg.grpc_timeout,
-            grpc_concurrency_limit: self.cfg.grpc_concurrency_limit,
-            grpc_message_size: self.cfg.grpc_message_size,
-            grpc_breaker_threshold: self.cfg.grpc_breaker_threshold,
-            grpc_breaker_retry_interval: self.cfg.grpc_breaker_retry_interval.as_millis() as i64,
-        }
+        Mailbox::new(
+            Arc::new(DashMap::default()),
+            self.tx.clone(),
+            self.cfg.grpc_timeout,
+            self.cfg.grpc_concurrency_limit,
+            self.cfg.grpc_message_size,
+            self.cfg.grpc_breaker_threshold,
+            self.cfg.grpc_breaker_retry_interval.as_millis() as i64,
+        )
     }
 
     /// Finds leader information by querying a list of peer addresses.
@@ -459,58 +558,59 @@ impl<S: Store + Send + Sync + 'static> Raft<S> {
             }
         };
 
-        //try remove from the cluster
-        let mut change_remove = ConfChange::default();
-        change_remove.set_node_id(node_id);
-        change_remove.set_change_type(ConfChangeType::RemoveNode);
-        let change_remove = RiteraftConfChange {
-            inner: ConfChange::encode_to_vec(&change_remove),
-        };
-
-        let raft_response = client
-            .change_config(Request::new(change_remove))
-            .await?
-            .into_inner();
-
-        info!(
-            "change_remove raft_response: {:?}",
-            deserialize::<RaftResponse>(&raft_response.inner)?
-        );
-
-        // 3. Join the cluster
-        // TODO: handle wrong leader
-        let mut change = ConfChange::default();
-        change.set_node_id(node_id);
-        change.set_change_type(ConfChangeType::AddNode);
-        change.set_context(serialize(&node_addr)?);
-        // change.set_context(serialize(&node_addr)?);
-
-        let change = RiteraftConfChange {
-            inner: ConfChange::encode_to_vec(&change),
-        };
-        let raft_response = client
-            .change_config(Request::new(change))
-            .await?
-            .into_inner();
-        if let RaftResponse::JoinSuccess {
-            assigned_id,
-            peer_addrs,
-        } = deserialize(&raft_response.inner)?
-        {
-            info!(
-                "change_config response.assigned_id: {:?}, peer_addrs: {:?}",
-                assigned_id, peer_addrs
-            );
-            for (id, addr) in peer_addrs {
-                if id != assigned_id {
-                    node.add_peer(&addr, id);
-                }
-            }
-        } else {
-            return Err(Error::JoinError);
-        }
-
         let node_handle = async {
+            tokio::time::sleep(Duration::from_millis(1500)).await;
+            //try remove from the cluster
+            let mut change_remove = ConfChange::default();
+            change_remove.set_node_id(node_id);
+            change_remove.set_change_type(ConfChangeType::RemoveNode);
+            let change_remove = RiteraftConfChange {
+                inner: ConfChange::encode_to_vec(&change_remove),
+            };
+
+            let raft_response = client
+                .change_config(Request::new(change_remove))
+                .await?
+                .into_inner();
+
+            info!(
+                "change_remove raft_response: {:?}",
+                deserialize::<RaftResponse>(&raft_response.inner)?
+            );
+
+            // 3. Join the cluster
+            // TODO: handle wrong leader
+            let mut change = ConfChange::default();
+            change.set_node_id(node_id);
+            change.set_change_type(ConfChangeType::AddNode);
+            change.set_context(serialize(&node_addr)?);
+            // change.set_context(serialize(&node_addr)?);
+
+            let change = RiteraftConfChange {
+                inner: ConfChange::encode_to_vec(&change),
+            };
+            let raft_response = client
+                .change_config(Request::new(change))
+                .await?
+                .into_inner();
+            if let RaftResponse::JoinSuccess {
+                assigned_id,
+                peer_addrs,
+            } = deserialize(&raft_response.inner)?
+            {
+                info!(
+                    "change_config response.assigned_id: {:?}, peer_addrs: {:?}",
+                    assigned_id, peer_addrs
+                );
+                for (id, addr) in peer_addrs {
+                    if id != assigned_id {
+                        node.add_peer(&addr, id);
+                    }
+                }
+            } else {
+                return Err(Error::JoinError);
+            }
+
             if let Err(e) = node.run().await {
                 warn!("node run error: {:?}", e);
                 Err(e)
