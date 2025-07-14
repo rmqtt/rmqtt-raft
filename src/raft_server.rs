@@ -115,13 +115,14 @@ impl RaftService for RaftServer {
                 warn!("sending wrong leader");
                 Ok(Response::new(raft_service::IdRequestReponse {
                     code: raft_service::ResultCode::WrongLeader as i32,
-                    data: serialize(&(leader_id, leader_addr)).unwrap(),
+                    data: serialize(&(leader_id, leader_addr))
+                        .map_err(|e| Status::unavailable(e.to_string()))?,
                 }))
             }
             RaftResponse::RequestId { leader_id } => {
                 Ok(Response::new(raft_service::IdRequestReponse {
                     code: raft_service::ResultCode::Ok as i32,
-                    data: serialize(&leader_id).unwrap(),
+                    data: serialize(&leader_id).map_err(|e| Status::unavailable(e.to_string()))?,
                 }))
             }
             _ => unreachable!(),
@@ -194,7 +195,7 @@ impl RaftService for RaftServer {
             Ok(()) => {
                 let response = RaftResponse::Ok;
                 Ok(Response::new(raft_service::RaftResponse {
-                    inner: serialize(&response).unwrap(),
+                    inner: serialize(&response).map_err(|e| Status::unavailable(e.to_string()))?,
                 }))
             }
             Err(_) => Err(Status::unavailable("error for try send message")),

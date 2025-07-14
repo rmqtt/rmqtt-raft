@@ -4,13 +4,16 @@ use std::sync::atomic::{AtomicI64, AtomicIsize, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use anyhow::anyhow;
 use bincode::{deserialize, serialize};
+use box_counter::Counter;
 use bytestring::ByteString;
 use futures::channel::{mpsc, oneshot};
 use futures::SinkExt;
 use futures::StreamExt;
 use log::*;
 use prost::Message as _;
+use scopeguard::guard;
 use tikv_raft::eraftpb::{ConfChange, ConfChangeType, Entry, EntryType, Message as RaftMessage};
 use tikv_raft::{prelude::*, raw_node::RawNode, Config as RaftConfig};
 use tokio::sync::RwLock;
@@ -23,6 +26,7 @@ use crate::raft::Store;
 use crate::raft_service::raft_service_client::RaftServiceClient;
 use crate::raft_service::{connect, Message as RraftMessage, Proposal as RraftProposal, Query};
 use crate::storage::{LogStore, MemStorage};
+use crate::timeout_recorder::TimeoutRecorder;
 use crate::Config;
 
 pub type RaftGrpcClient = RaftServiceClient<tonic::transport::channel::Channel>;
@@ -40,12 +44,20 @@ struct MessageSender {
 impl MessageSender {
     /// attempt to send a message MessageSender::max_retries times at MessageSender::timeout
     /// inteval.
-    async fn send(mut self) {
+    async fn send(self) {
+        let sending_raft_messages = self.sending_raft_messages.clone();
+        sending_raft_messages.fetch_add(1, Ordering::SeqCst);
+        let _guard = guard((), |_| {
+            sending_raft_messages.fetch_sub(1, Ordering::SeqCst);
+        });
+        self._send().await
+    }
+
+    async fn _send(mut self) {
         let mut current_retry = 0usize;
         loop {
             match self.client.send_message(&self.message).await {
                 Ok(_) => {
-                    self.sending_raft_messages.fetch_sub(1, Ordering::SeqCst);
                     return;
                 }
                 Err(e) => {
@@ -69,7 +81,6 @@ impl MessageSender {
                                 current_retry, self.max_retries, e, self.client.addr
                             );
                         }
-                        self.sending_raft_messages.fetch_sub(1, Ordering::SeqCst);
                         return;
                     }
                 }
@@ -417,6 +428,8 @@ pub struct RaftNode<S: Store> {
     sending_raft_messages: Arc<AtomicIsize>,
     last_snap_time: Instant,
     cfg: Arc<Config>,
+    timeout_recorder: TimeoutRecorder,
+    propose_counter: Counter,
 }
 
 impl<S: Store + 'static> RaftNode<S> {
@@ -480,6 +493,8 @@ impl<S: Store + 'static> RaftNode<S> {
             sending_raft_messages,
             last_snap_time,
             cfg,
+            timeout_recorder: TimeoutRecorder::new(Duration::from_secs(15), 5),
+            propose_counter: Counter::new(Duration::from_secs(3)),
         };
         Ok(node)
     }
@@ -531,6 +546,8 @@ impl<S: Store + 'static> RaftNode<S> {
             sending_raft_messages,
             last_snap_time,
             cfg,
+            timeout_recorder: TimeoutRecorder::new(Duration::from_secs(10), 5),
+            propose_counter: Counter::new(Duration::from_secs(3)),
         })
     }
 
@@ -657,16 +674,24 @@ impl<S: Store + 'static> RaftNode<S> {
     }
 
     #[inline]
-    fn status(&self, merger_proposals: usize) -> Status {
+    async fn status(&self, merger_proposals: usize) -> Status {
         let role = self.raft.state;
         let leader_id = self.raft.leader_id;
         let sending_raft_messages = self.sending_raft_messages.load(Ordering::SeqCst);
+        let timeout_max = self.timeout_recorder.max() as isize;
+        let timeout_recent_count = self.timeout_recorder.recent_get() as isize;
+        let propose_count = self.propose_counter.count();
+        let propose_rate = self.propose_counter.rate();
         Status {
             id: self.inner.raft.id,
             leader_id,
             uncommitteds: self.uncommitteds.len(),
             merger_proposals,
             sending_raft_messages,
+            timeout_max,
+            timeout_recent_count,
+            propose_count,
+            propose_rate,
             peers: self.peer_states(),
             role,
         }
@@ -731,6 +756,13 @@ impl<S: Store + 'static> RaftNode<S> {
     }
 
     #[inline]
+    fn send_is_busy(&self, chan: oneshot::Sender<RaftResponse>) {
+        if let Err(e) = chan.send(RaftResponse::Busy) {
+            warn!("send_is_busy, RaftResponse send error: {:?}", e);
+        }
+    }
+
+    #[inline]
     fn _send_error(&self, chan: oneshot::Sender<RaftResponse>, e: String) {
         let raft_response = RaftResponse::Error(e);
         if let Err(e) = chan.send(raft_response) {
@@ -748,23 +780,35 @@ impl<S: Store + 'static> RaftNode<S> {
     }
 
     #[inline]
-    fn send_status(&self, merger: &Merger, chan: oneshot::Sender<RaftResponse>) {
-        if let Err(e) = chan.send(RaftResponse::Status(self.status(merger.len()))) {
+    async fn send_status(&self, merger: &Merger, chan: oneshot::Sender<RaftResponse>) {
+        if let Err(e) = chan.send(RaftResponse::Status(self.status(merger.len()).await)) {
             warn!("Message::Status, RaftResponse send error: {:?}", e);
         }
     }
 
     #[inline]
-    fn take_and_propose(&mut self, merger: &mut Merger) {
+    fn _take_and_propose(&mut self, merger: &mut Merger) -> Result<()> {
         if let Some((data, reply_chans)) = merger.take() {
             let seq = self.seq.fetch_add(1, Ordering::Relaxed);
             self.uncommitteds.insert(seq, reply_chans);
-            let seq = serialize(&seq).unwrap();
-            let data = serialize(&data).unwrap();
-            if let Err(e) = self.propose(seq, data) {
-                error!("propose to raft error, {:?}", e);
-            }
+            let seq = serialize(&seq).map_err(|e| anyhow!(e))?;
+            let data = serialize(&data).map_err(|e| anyhow!(e))?;
+            self.propose(seq, data)?;
         }
+        Ok(())
+    }
+
+    #[inline]
+    fn take_and_propose(&mut self, merger: &mut Merger) {
+        if let Err(e) = self._take_and_propose(merger) {
+            error!("propose to raft error, {:?}", e);
+        }
+    }
+
+    #[inline]
+    fn is_busy(&self) -> bool {
+        self.sending_raft_messages.load(Ordering::SeqCst) > 500
+            || self.timeout_recorder.recent_get() > 0
     }
 
     pub(crate) async fn run(mut self) -> Result<()> {
@@ -802,9 +846,16 @@ impl<S: Store + 'static> RaftNode<S> {
                         let seq = self.seq.fetch_add(1, Ordering::Relaxed);
                         self.uncommitteds
                             .insert(seq, ReplyChan::One((chan, Instant::now())));
-                        if let Err(e) = self.propose_conf_change(serialize(&seq).unwrap(), change) {
-                            warn!("propose_conf_change, error: {:?}", e);
-                        }
+                        match serialize(&seq) {
+                            Ok(req) => {
+                                if let Err(e) = self.propose_conf_change(req, change) {
+                                    warn!("propose_conf_change, error: {:?}", e);
+                                }
+                            }
+                            Err(e) => {
+                                warn!("serialize seq, error: {:?}", e);
+                            }
+                        };
                     }
                 }
                 Ok(Some(Message::Raft(m))) => {
@@ -844,10 +895,13 @@ impl<S: Store + 'static> RaftNode<S> {
                     }
                 }
                 Ok(Some(Message::Propose { proposal, chan })) => {
+                    self.propose_counter.inc();
                     let now = Instant::now();
                     if !self.is_leader() {
                         debug!("Message::Propose, send_wrong_leader {:?}", proposal);
                         self.send_wrong_leader("Propose", chan);
+                    } else if self.is_busy() {
+                        self.send_is_busy(chan);
                     } else {
                         merger.add(proposal, chan);
                         self.take_and_propose(&mut merger);
@@ -880,7 +934,7 @@ impl<S: Store + 'static> RaftNode<S> {
                     }
                 }
                 Ok(Some(Message::Status { chan })) => {
-                    self.send_status(&merger, chan);
+                    self.send_status(&merger, chan).await;
                 }
                 Ok(Some(Message::ReportUnreachable { node_id })) => {
                     debug!(
@@ -1009,11 +1063,10 @@ impl<S: Store + 'static> RaftNode<S> {
                 client,
                 client_id,
                 chan: self.snd.clone(),
-                max_retries: 1,
+                max_retries: 0,
                 timeout: Duration::from_millis(500),
                 sending_raft_messages: self.sending_raft_messages.clone(),
             };
-            self.sending_raft_messages.fetch_add(1, Ordering::SeqCst);
             tokio::spawn(message_sender.send());
         }
     }
@@ -1140,23 +1193,35 @@ impl<S: Store + 'static> RaftNode<S> {
                 let apply_start = std::time::Instant::now();
                 let reply =
                     tokio::time::timeout(Duration::from_secs(5), self.store.apply(&data)).await;
-                if apply_start.elapsed().as_secs() > 3 {
+                if apply_start.elapsed().as_secs() > 2 {
+                    self.timeout_recorder.incr();
                     log::warn!("apply, cost time: {:?}", apply_start.elapsed());
                 }
-                let reply = reply.unwrap_or_else(|e| Err(Error::from(e)));
                 if let Some(ReplyChan::One((chan, inst))) = chan {
-                    let res = match reply {
-                        Ok(data) => RaftResponse::Response { data },
-                        Err(e) => RaftResponse::Error(e.to_string()),
-                    };
-                    if let Err(_resp) = chan.send(res) {
-                        warn!(
-                            "[handle_normal] send RaftResponse error, seq:{}, cost time: {:?}, uncommitteds: {}, sending_raft_messages: {}",
-                            seq,
-                            inst.elapsed(),
-                            self.uncommitteds.len(),
-                            self.sending_raft_messages.load(Ordering::SeqCst)
-                        );
+                    if inst.elapsed().as_secs() > 2 {
+                        self.timeout_recorder.incr();
+                        debug!(
+                                "[handle_normal] cost time, {:?}, chan is canceled: {}, uncommitteds: {}, sending_raft_messages: {}",
+                                inst.elapsed(),
+                                chan.is_canceled(),
+                                self.uncommitteds.len(),
+                                self.sending_raft_messages.load(Ordering::SeqCst)
+                            );
+                    }
+                    if !chan.is_canceled() {
+                        let reply = reply.unwrap_or_else(|e| Err(Error::from(e)));
+                        let res = match reply {
+                            Ok(data) => RaftResponse::Response { data },
+                            Err(e) => RaftResponse::Error(e.to_string()),
+                        };
+                        if let Err(_resp) = chan.send(res) {
+                            warn!(
+                                "[handle_normal] send RaftResponse error, seq:{}, uncommitteds: {}, sending_raft_messages: {}",
+                                seq,
+                                self.uncommitteds.len(),
+                                self.sending_raft_messages.load(Ordering::SeqCst)
+                            );
+                        }
                     }
                 }
             }
@@ -1170,13 +1235,14 @@ impl<S: Store + 'static> RaftNode<S> {
                     let apply_start = std::time::Instant::now();
                     let reply =
                         tokio::time::timeout(Duration::from_secs(5), self.store.apply(&data)).await;
-                    if apply_start.elapsed().as_secs() > 3 {
+                    if apply_start.elapsed().as_secs() > 2 {
+                        self.timeout_recorder.incr();
                         log::warn!("apply, cost time: {:?}", apply_start.elapsed());
                     }
-                    let reply = reply.unwrap_or_else(|e| Err(Error::from(e)));
                     if let Some((chan, inst)) = chans.as_mut().and_then(|cs| cs.pop()) {
-                        if inst.elapsed().as_secs() > 3 {
-                            warn!(
+                        if inst.elapsed().as_secs() > 2 {
+                            self.timeout_recorder.incr();
+                            debug!(
                                 "[handle_normal] cost time, {:?}, chan is canceled: {}, uncommitteds: {}, sending_raft_messages: {}",
                                 inst.elapsed(),
                                 chan.is_canceled(),
@@ -1184,16 +1250,15 @@ impl<S: Store + 'static> RaftNode<S> {
                                 self.sending_raft_messages.load(Ordering::SeqCst)
                             );
                         }
-                        let res = match reply {
-                            Ok(data) => RaftResponse::Response { data },
-                            Err(e) => RaftResponse::Error(e.to_string()),
-                        };
-                        if let Err(_resp) = chan.send(res) {
-                            warn!(
-                                "[handle_normal] send RaftResponse error, seq:{}, cost time: {:?}",
-                                seq,
-                                inst.elapsed()
-                            );
+                        if !chan.is_canceled() {
+                            let reply = reply.unwrap_or_else(|e| Err(Error::from(e)));
+                            let res = match reply {
+                                Ok(data) => RaftResponse::Response { data },
+                                Err(e) => RaftResponse::Error(e.to_string()),
+                            };
+                            if let Err(_resp) = chan.send(res) {
+                                warn!("[handle_normal] send RaftResponse error, seq:{}", seq,);
+                            }
                         }
                     }
                 }

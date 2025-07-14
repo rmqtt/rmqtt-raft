@@ -2,6 +2,7 @@ use thiserror::Error as ThisError;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+#[allow(clippy::result_large_err)]
 #[derive(Debug, ThisError)]
 pub enum Error {
     #[error("raft error: `{0}`")]
@@ -18,6 +19,8 @@ pub enum Error {
     Other(#[source] Box<dyn std::error::Error + Sync + Send + 'static>),
     #[error("unexpected error")]
     Unknown,
+    #[error("too busy")]
+    Busy,
     #[error("leader does not exist")]
     LeaderNotExist,
     #[error("Not a Leader")]
