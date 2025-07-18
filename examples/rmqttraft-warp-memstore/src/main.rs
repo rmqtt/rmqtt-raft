@@ -58,6 +58,7 @@ impl Store for HashStore {
             Message::Insert { key, value } => {
                 let mut db = self.0.write().unwrap();
                 let v = serialize(&value).unwrap();
+                // log::info!("{key}={value}");
                 db.insert(key, value);
                 v
             }
@@ -82,13 +83,18 @@ impl Store for HashStore {
     }
 
     async fn snapshot(&self) -> RaftResult<Vec<u8>> {
-        Ok(serialize(&self.0.read().unwrap().clone())?)
+        let data = serialize(&self.0.read().unwrap().clone())?;
+        log::info!("snapshot len: {}", data.len());
+        Ok(data)
     }
 
     async fn restore(&mut self, snapshot: &[u8]) -> RaftResult<()> {
-        let new: HashMap<String, String> = deserialize(snapshot).unwrap();
-        let mut db = self.0.write().unwrap();
-        let _ = std::mem::replace(&mut *db, new);
+        log::info!("restore len: {}", snapshot.len());
+        if !snapshot.is_empty() {
+            let new: HashMap<String, String> = deserialize(snapshot).unwrap();
+            let mut db = self.0.write().unwrap();
+            let _ = std::mem::replace(&mut *db, new);
+        }
         Ok(())
     }
 }
@@ -108,6 +114,7 @@ async fn put(
     key: String,
     value: String,
 ) -> Result<impl warp::Reply, Infallible> {
+    let value = format!("{value}-{}", incr_one());
     let message = Message::Insert { key, value };
     let message = serialize(&message).unwrap();
     let result = mailbox.send_proposal(message).await;
@@ -196,6 +203,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let cfg = Config {
         reuseaddr: true,
         reuseport: true,
+        snapshot_interval: Duration::from_secs(60),
         // grpc_message_size: 50 * 1024 * 1024,
         ..Default::default()
     };
@@ -267,6 +275,7 @@ use slog_term::RecordDecorator;
 use slog_term::ThreadSafeTimestampFn;
 use std::io;
 use std::io::Write;
+use std::time::Duration;
 
 fn timestamp(io: &mut dyn std::io::Write) -> std::io::Result<()> {
     write!(
@@ -308,4 +317,19 @@ fn custom_header_format(
     let mut count_rd = CountingWriter::new(&mut rd);
     write!(count_rd, "{}", record.msg())?;
     Ok(count_rd.count() != 0)
+}
+
+use std::sync::atomic::{AtomicUsize, Ordering};
+static GLOBAL_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+pub fn increment_counter(by: usize) -> usize {
+    GLOBAL_COUNTER.fetch_add(by, Ordering::Relaxed) + by
+}
+
+pub fn incr_one() -> usize {
+    GLOBAL_COUNTER.fetch_add(1, Ordering::Relaxed) + 1
+}
+
+pub fn get_counter() -> usize {
+    GLOBAL_COUNTER.load(Ordering::Relaxed)
 }
