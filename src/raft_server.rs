@@ -112,7 +112,7 @@ impl RaftService for RaftServer {
                 leader_id,
                 leader_addr,
             } => {
-                warn!("sending wrong leader");
+                warn!("sending wrong leader, leader_id: {leader_id}, leader_addr: {leader_addr:?}");
                 Ok(Response::new(raft_service::IdRequestReponse {
                     code: raft_service::ResultCode::WrongLeader as i32,
                     data: serialize(&(leader_id, leader_addr))

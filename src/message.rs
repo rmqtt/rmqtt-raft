@@ -1,13 +1,14 @@
-use bytestring::ByteString;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
+use bytestring::ByteString;
 use serde::de::{self, Deserializer};
 use serde::ser::Serializer;
 use serde::{Deserialize, Serialize};
 
 use futures::channel::oneshot::Sender;
 use tikv_raft::eraftpb::{ConfChange, Message as RaftMessage};
+use tikv_raft::prelude::Snapshot;
 use tikv_raft::StateRole;
 
 /// Enumeration representing various types of responses that can be sent back to clients.
@@ -63,6 +64,8 @@ pub enum Message {
     Raft(Box<RaftMessage>),
     /// A request for the status of the system.
     Status { chan: Sender<RaftResponse> },
+    /// Snapshot
+    Snapshot { snapshot: Snapshot },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -183,6 +186,12 @@ impl Status {
         }
         .serialize(s)
     }
+}
+
+#[derive(Clone, Serialize, Deserialize, Debug)]
+pub(crate) enum RemoveNodeType {
+    Normal,
+    Stale,
 }
 
 /// Enumeration for reply channels which could be single or multiple.

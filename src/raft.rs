@@ -16,7 +16,7 @@ use tokio::time::timeout;
 use tonic::Request;
 
 use crate::error::{Error, Result};
-use crate::message::{Message, RaftResponse, Status};
+use crate::message::{Message, RaftResponse, RemoveNodeType, Status};
 use crate::raft_node::{Peer, RaftNode};
 use crate::raft_server::RaftServer;
 use crate::raft_service::connect;
@@ -26,7 +26,7 @@ use crate::Config;
 type DashMap<K, V> = dashmap::DashMap<K, V, ahash::RandomState>;
 
 #[async_trait]
-pub trait Store {
+pub trait Store: Clone + Send + Sync {
     async fn apply(&mut self, message: &[u8]) -> Result<Vec<u8>>;
     async fn query(&self, query: &[u8]) -> Result<Vec<u8>>;
     async fn snapshot(&self) -> Result<Vec<u8>>;
@@ -257,6 +257,7 @@ impl Mailbox {
         // set node id to 0, the node will set it to self when it receives it.
         change.set_node_id(0);
         change.set_change_type(ConfChangeType::RemoveNode);
+        change.set_context(serialize(&RemoveNodeType::Normal)?);
         let mut sender = self.sender.clone();
         let (chan, rx) = oneshot::channel();
         match sender.send(Message::ConfigChange { change, chan }).await {
@@ -315,15 +316,6 @@ impl Mailbox {
 
     #[inline]
     async fn get_leader_info(&self) -> Result<LeaderInfo> {
-        // if true {
-        //     return match self._get_leader_info().await {
-        //         Ok(leader_info) => Ok(leader_info),
-        //         Err(e) => {
-        //             let err = e.to_string().into();
-        //             Err(err)
-        //         }
-        //     };
-        // }
         {
             let leader_info = self.leader_info.read().await;
             if let Some((leader_info, err, inst)) = leader_info.as_ref() {
@@ -480,7 +472,8 @@ impl<S: Store + Send + Sync + 'static> Raft<S> {
             self.store,
             &self.logger,
             self.cfg.clone(),
-        )?;
+        )
+        .await?;
 
         let server = RaftServer::new(self.tx, self.laddr, self.cfg.clone());
         let server_handle = async {
@@ -564,6 +557,7 @@ impl<S: Store + Send + Sync + 'static> Raft<S> {
             let mut change_remove = ConfChange::default();
             change_remove.set_node_id(node_id);
             change_remove.set_change_type(ConfChangeType::RemoveNode);
+            change_remove.set_context(serialize(&RemoveNodeType::Stale)?);
             let change_remove = RiteraftConfChange {
                 inner: ConfChange::encode_to_vec(&change_remove),
             };

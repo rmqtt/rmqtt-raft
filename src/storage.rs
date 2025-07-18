@@ -31,8 +31,9 @@ pub trait LogStore: Storage {
     /// Sets the configuration state for the Raft state machine.
     fn set_conf_state(&mut self, conf_state: &ConfState) -> Result<()>;
 
-    /// Creates a snapshot with the given data.
-    fn create_snapshot(&mut self, data: prost::bytes::Bytes) -> Result<()>;
+    fn create_snapshot(&mut self, applied_index: u64, term: u64) -> Result<Snapshot>;
+
+    fn set_snapshot(&mut self, snapshot: Snapshot);
 
     /// Applies a snapshot to the log store.
     fn apply_snapshot(&mut self, snapshot: Snapshot) -> Result<()>;
@@ -138,21 +139,19 @@ impl LogStore for MemStorage {
         Ok(())
     }
 
-    /// Creates a snapshot with the given data.
-    ///
-    /// This method initializes a new snapshot with the provided data and stores it in the `snapshot` field.
-    ///
-    /// # Parameters
-    /// - `data`: The data to be included in the snapshot.
-    ///
-    /// # Returns
-    /// Returns a `Result` indicating success or failure.
     #[inline]
-    fn create_snapshot(&mut self, data: prost::bytes::Bytes) -> Result<()> {
-        let mut snapshot = self.core.snapshot(0, 0)?;
-        snapshot.set_data(data.to_vec());
+    fn create_snapshot(&mut self, applied_index: u64, term: u64) -> Result<Snapshot> {
+        let mut snapshot = self.core.snapshot(applied_index, 0)?;
+        let mut metadata = snapshot.take_metadata();
+        metadata.index = applied_index;
+        metadata.term = term;
+        snapshot.set_metadata(metadata);
+        Ok(snapshot)
+    }
+
+    #[inline]
+    fn set_snapshot(&mut self, snapshot: Snapshot) {
         self.snapshot = snapshot;
-        Ok(())
     }
 
     /// Applies a snapshot to the in-memory log store.
@@ -167,6 +166,9 @@ impl LogStore for MemStorage {
     #[inline]
     fn apply_snapshot(&mut self, snapshot: Snapshot) -> Result<()> {
         let mut store = self.core.wl();
+        self.snapshot = snapshot;
+        let mut snapshot = Snapshot::default();
+        snapshot.set_metadata(self.snapshot.get_metadata().clone());
         store.apply_snapshot(snapshot)?;
         Ok(())
     }
@@ -274,6 +276,15 @@ impl Storage for MemStorage {
     /// Returns a `Result` containing the current `Snapshot` on success.
     #[inline]
     fn snapshot(&self, _request_index: u64, _to: u64) -> tikv_raft::Result<Snapshot> {
-        Ok(self.snapshot.clone())
+        log::info!(
+            "get snapshot, _request_index: {_request_index}, _to: {_to}, snapshot metadata: {:?}, snapshot data len: {}",
+            self.snapshot.get_metadata(), self.snapshot.get_data().len()
+        );
+        // Ok(self.snapshot.clone())
+        let mut snap = self.core.snapshot(_request_index, _to)?;
+        snap.mut_metadata().index = self.snapshot.get_metadata().index;
+        snap.mut_metadata().term = self.snapshot.get_metadata().term;
+        *snap.mut_data() = self.snapshot.get_data().to_vec();
+        Ok(snap)
     }
 }

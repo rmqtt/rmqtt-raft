@@ -21,7 +21,9 @@ use tokio::time::timeout;
 use tonic::Request;
 
 use crate::error::{Error, Result};
-use crate::message::{Merger, Message, PeerState, Proposals, RaftResponse, ReplyChan, Status};
+use crate::message::{
+    Merger, Message, PeerState, Proposals, RaftResponse, RemoveNodeType, ReplyChan, Status,
+};
 use crate::raft::Store;
 use crate::raft_service::raft_service_client::RaftServiceClient;
 use crate::raft_service::{connect, Message as RraftMessage, Proposal as RraftProposal, Query};
@@ -448,7 +450,7 @@ impl<S: Store + 'static> RaftNode<S> {
     ///
     /// # Returns
     /// Returns a `Result` containing either the newly created `RaftNode` or an error if the creation failed.
-    pub fn new_leader(
+    pub async fn new_leader(
         rcv: mpsc::Receiver<Message>,
         snd: mpsc::Sender<Message>,
         id: u64,
@@ -466,6 +468,7 @@ impl<S: Store + 'static> RaftNode<S> {
         s.mut_metadata().index = 1;
         s.mut_metadata().term = 1;
         s.mut_metadata().mut_conf_state().voters = vec![id];
+        s.set_data(store.snapshot().await?);
 
         let mut storage: MemStorage = MemStorage::create();
         storage.apply_snapshot(s)?;
@@ -859,15 +862,19 @@ impl<S: Store + 'static> RaftNode<S> {
                     }
                 }
                 Ok(Some(Message::Raft(m))) => {
-                    debug!(
-                        "raft message: to={} from={} msg_type={:?}, commit={}, {:?}",
-                        self.raft.id,
-                        m.from,
-                        m.msg_type,
-                        m.get_commit(),
-                        m
-                    );
                     let msg_type = m.get_msg_type();
+                    if msg_type != MessageType::MsgHeartbeat
+                        && msg_type != MessageType::MsgHeartbeatResponse
+                    {
+                        debug!(
+                            "raft message: to={} from={} msg_type={:?}, commit={}, {:?}",
+                            self.raft.id,
+                            m.from,
+                            m.msg_type,
+                            m.get_commit(),
+                            m
+                        );
+                    }
                     if MessageType::MsgTransferLeader == msg_type {
                         info!(
                             "raft message MsgTransferLeader, snapshot_received: {}, raft.leader_id: {}, {:?}",
@@ -876,7 +883,7 @@ impl<S: Store + 'static> RaftNode<S> {
                     }
 
                     if !snapshot_received && msg_type == MessageType::MsgHeartbeat {
-                        info!(
+                        debug!(
                             "raft message, snapshot_received: {}, has_leader: {}, {:?}",
                             snapshot_received,
                             self.has_leader(),
@@ -935,6 +942,9 @@ impl<S: Store + 'static> RaftNode<S> {
                 }
                 Ok(Some(Message::Status { chan })) => {
                     self.send_status(&merger, chan).await;
+                }
+                Ok(Some(Message::Snapshot { snapshot })) => {
+                    self.set_snapshot(snapshot);
                 }
                 Ok(Some(Message::ReportUnreachable { node_id })) => {
                     debug!(
@@ -1006,12 +1016,14 @@ impl<S: Store + 'static> RaftNode<S> {
 
         if *ready.snapshot() != Snapshot::default() {
             let snapshot = ready.snapshot();
+            log::info!(
+                "snapshot metadata: {:?}, data len: {}",
+                snapshot.get_metadata(),
+                snapshot.get_data().len()
+            );
             self.store.restore(snapshot.get_data()).await?;
             let store = self.mut_store();
-            store.apply_snapshot(Snapshot {
-                metadata: Some(snapshot.get_metadata().clone()),
-                ..Default::default()
-            })?;
+            store.apply_snapshot(snapshot.clone())?;
         }
 
         self.handle_committed_entries(ready.take_committed_entries())
@@ -1110,8 +1122,10 @@ impl<S: Store + 'static> RaftNode<S> {
     async fn handle_config_change(&mut self, entry: &Entry) -> Result<()> {
         info!("handle_config_change, entry: {:?}", entry);
         let seq: u64 = deserialize(entry.get_context())?;
+        info!("handle_config_change, seq: {:?}", seq);
         let change = ConfChange::decode(entry.get_data())
             .map_err(|e| tonic::Status::invalid_argument(e.to_string()))?;
+        info!("handle_config_change, change: {:?}", change);
         let id = change.get_node_id();
 
         let change_type = change.get_change_type();
@@ -1123,9 +1137,18 @@ impl<S: Store + 'static> RaftNode<S> {
                 self.add_peer(&addr, id);
             }
             ConfChangeType::RemoveNode => {
+                let ctx = change.get_context();
+                let typ = if ctx.len() > 0 {
+                    deserialize(change.get_context())?
+                } else {
+                    RemoveNodeType::Normal
+                };
+                info!("removing ({}) to peers, RemoveNodeType: {:?}", id, typ);
                 if change.get_node_id() == self.id() {
-                    self.should_quit = true;
-                    warn!("quiting the cluster");
+                    if !matches!(typ, RemoveNodeType::Stale) {
+                        self.should_quit = true;
+                        warn!("quiting the cluster");
+                    }
                 } else {
                     self.peers.remove(&change.get_node_id());
                 }
@@ -1136,22 +1159,13 @@ impl<S: Store + 'static> RaftNode<S> {
         }
 
         if let Ok(cs) = self.apply_conf_change(&change) {
-            let last_applied = self.raft.raft_log.applied;
+            info!("conf state: {cs:?}");
             if matches!(change_type, ConfChangeType::AddNode) {
-                self.last_snap_time = Instant::now();
-                let snapshot = prost::bytes::Bytes::from(self.store.snapshot().await?);
-                info!(
-                    "create snapshot cost time: {:?}",
-                    self.last_snap_time.elapsed(),
-                );
                 let store = self.mut_store();
                 store.set_conf_state(&cs)?;
-                store.compact(last_applied)?;
-                store.create_snapshot(snapshot)?;
             } else {
                 let store = self.mut_store();
                 store.set_conf_state(&cs)?;
-                store.compact(last_applied)?;
             }
         }
 
@@ -1267,23 +1281,52 @@ impl<S: Store + 'static> RaftNode<S> {
 
         if Instant::now() > self.last_snap_time + self.cfg.snapshot_interval {
             self.last_snap_time = Instant::now();
-            let last_applied = self.raft.raft_log.applied;
-            let snapshot = prost::bytes::Bytes::from(self.store.snapshot().await?);
-            let store = self.mut_store();
-            store.compact(last_applied)?;
-            let first_index = store.first_index().unwrap_or(0);
-            let last_index = store.last_index().unwrap_or(0);
-            let result = store.create_snapshot(snapshot);
-            info!(
-                "create snapshot cost time: {:?}, first_index: {:?}, last_index: {:?}, {}, create snapshot result: {:?}",
-                self.last_snap_time.elapsed(),
-                first_index,
-                last_index,
-                (last_index as i64 - first_index as i64),
-                result
-            );
+            info!("gen snapshot start");
+            self.gen_snapshot()?;
         }
         Ok(())
+    }
+
+    fn gen_snapshot(&mut self) -> Result<()> {
+        let store = self.store.clone();
+        let mut tx = self.snd.clone();
+        let last_applied = self.raft.raft_log.applied;
+        let last_term = self.raft.raft_log.term(last_applied).unwrap_or(0);
+        let mut snapshot = self.mut_store().create_snapshot(last_applied, last_term)?;
+
+        tokio::spawn(async move {
+            let now = Instant::now();
+            let snap = match store.snapshot().await {
+                Err(e) => {
+                    log::error!("gen snapshot error, {e:?}");
+                    return;
+                }
+                Ok(snap) => snap,
+            };
+            info!(
+                "gen snapshot cost time: {:?}, snapshot len: {}, last_applied: {last_applied}",
+                now.elapsed(),
+                snap.len()
+            );
+
+            snapshot.set_data(snap);
+
+            if let Err(e) = tx.send(Message::Snapshot { snapshot }).await {
+                log::error!("send snapshot error, {e:?}");
+            }
+        });
+
+        Ok(())
+    }
+
+    fn set_snapshot(&mut self, snap: Snapshot) {
+        let store = self.mut_store();
+        let last_applied = snap.get_metadata().index;
+        store.set_snapshot(snap);
+        if let Err(e) = store.compact(last_applied) {
+            error!("compact error, {e}");
+        }
+        info!("set snapshot,last_applied: {last_applied}");
     }
 }
 
