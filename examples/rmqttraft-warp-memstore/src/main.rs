@@ -9,6 +9,8 @@ use rmqtt_raft::{Config, Mailbox, Raft, Result as RaftResult, Store};
 use serde::{Deserialize, Serialize};
 use slog::info;
 use slog::Drain;
+use slog_async::Async;
+use slog_async::OverflowStrategy;
 use std::collections::HashMap;
 use std::convert::From;
 use std::convert::Infallible;
@@ -114,7 +116,7 @@ async fn put(
             let result: String = deserialize(&r).unwrap();
             Ok(reply::json(&result))
         }
-        Err(e) => Ok(reply::json(&format!("put error, {:?}", e))),
+        Err(e) => Ok(reply::json(&format!("put error, {e:?}"))),
     }
 }
 
@@ -170,13 +172,23 @@ async fn status(mailbox: Arc<Mailbox>) -> Result<impl warp::Reply, Infallible> {
 #[tokio::main]
 async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let decorator = slog_term::TermDecorator::new().build();
-    let drain = slog_term::FullFormat::new(decorator).build().fuse();
-    let drain = slog_async::Async::new(drain).build().fuse();
+    let drain = slog_term::FullFormat::new(decorator)
+        .use_custom_timestamp(timestamp)
+        .use_custom_header_print(custom_header_format)
+        .build()
+        .fuse();
+    let drain = slog::LevelFilter::new(drain, slog::Level::Info).fuse();
+    let drain = Async::new(drain)
+        .chan_size(1024)
+        .overflow_strategy(OverflowStrategy::Block)
+        .build()
+        .fuse();
     let logger = slog::Logger::root(drain, slog_o!("version" => env!("CARGO_PKG_VERSION")));
 
     // converts log to slog
     #[allow(clippy::let_unit_value)]
-    let _log_guard = slog_stdlog::init().unwrap();
+    let _guard = slog_scope::set_global_logger(logger.clone());
+    slog_stdlog::init_with_level(log::Level::Info)?;
 
     let options = Options::from_args();
     let store = HashStore::new();
@@ -247,4 +259,53 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 
     tokio::try_join!(raft_handle)?.0?;
     Ok(())
+}
+
+use slog::Record;
+use slog_term::CountingWriter;
+use slog_term::RecordDecorator;
+use slog_term::ThreadSafeTimestampFn;
+use std::io;
+use std::io::Write;
+
+fn timestamp(io: &mut dyn std::io::Write) -> std::io::Result<()> {
+    write!(
+        io,
+        "{}",
+        chrono::Local::now().format("%Y-%m-%d %H:%M:%S.3f")
+    )
+}
+
+fn custom_header_format(
+    fn_timestamp: &dyn ThreadSafeTimestampFn<Output = io::Result<()>>,
+    mut rd: &mut dyn RecordDecorator,
+    record: &Record,
+    _use_file_location: bool,
+) -> io::Result<bool> {
+    rd.start_timestamp()?;
+    fn_timestamp(&mut rd)?;
+
+    rd.start_whitespace()?;
+    write!(rd, " ")?;
+
+    rd.start_level()?;
+    write!(rd, "{}", record.level().as_short_str())?;
+
+    rd.start_location()?;
+    if record.function().is_empty() {
+        write!(rd, " {}.{} | ", record.module(), record.line())?;
+    } else {
+        write!(
+            rd,
+            " {}::{}.{} | ",
+            record.module(),
+            record.function(),
+            record.line()
+        )?;
+    }
+
+    rd.start_msg()?;
+    let mut count_rd = CountingWriter::new(&mut rd);
+    write!(count_rd, "{}", record.msg())?;
+    Ok(count_rd.count() != 0)
 }
