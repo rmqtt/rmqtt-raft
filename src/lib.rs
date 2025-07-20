@@ -1,3 +1,5 @@
+#![allow(clippy::result_large_err)]
+
 use std::time::Duration;
 
 // Re-exporting necessary types and modules for external use.
@@ -14,6 +16,7 @@ mod raft_node;
 mod raft_server;
 mod raft_service;
 mod storage;
+mod timeout_recorder;
 
 /// Configuration options for the Raft-based system.
 #[derive(Clone)]

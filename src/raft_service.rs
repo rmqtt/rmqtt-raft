@@ -30,7 +30,7 @@ pub(crate) fn endpoint(
     concurrency_limit: usize,
     timeout: Duration,
 ) -> Result<Endpoint> {
-    let endpoint = Channel::from_shared(format!("http://{}", saddr))
+    let endpoint = Channel::from_shared(format!("http://{saddr}"))
         .map(|endpoint| {
             endpoint
                 .concurrency_limit(concurrency_limit)
