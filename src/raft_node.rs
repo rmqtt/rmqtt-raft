@@ -1146,12 +1146,12 @@ impl<S: Store + 'static> RaftNode<S> {
                 );
                 let store = self.mut_store();
                 store.set_conf_state(&cs)?;
-                store.compact(last_applied)?;
                 store.create_snapshot(snapshot)?;
+                store.compact(last_applied)?;
             } else {
                 let store = self.mut_store();
                 store.set_conf_state(&cs)?;
-                store.compact(last_applied)?;
+                // store.compact(last_applied)?;
             }
         }
 
@@ -1270,10 +1270,10 @@ impl<S: Store + 'static> RaftNode<S> {
             let last_applied = self.raft.raft_log.applied;
             let snapshot = prost::bytes::Bytes::from(self.store.snapshot().await?);
             let store = self.mut_store();
-            store.compact(last_applied)?;
             let first_index = store.first_index().unwrap_or(0);
             let last_index = store.last_index().unwrap_or(0);
             let result = store.create_snapshot(snapshot);
+            store.compact(last_applied)?;
             info!(
                 "create snapshot cost time: {:?}, first_index: {:?}, last_index: {:?}, {}, create snapshot result: {:?}",
                 self.last_snap_time.elapsed(),
