@@ -1138,19 +1138,19 @@ impl<S: Store + 'static> RaftNode<S> {
             }
             ConfChangeType::RemoveNode => {
                 let ctx = change.get_context();
-                let typ = if ctx.len() > 0 {
+                let typ = if !ctx.is_empty() {
                     deserialize(change.get_context())?
                 } else {
                     RemoveNodeType::Normal
                 };
                 info!("removing ({}) to peers, RemoveNodeType: {:?}", id, typ);
-                if change.get_node_id() == self.id() {
+                if id == self.id() {
                     if !matches!(typ, RemoveNodeType::Stale) {
                         self.should_quit = true;
                         warn!("quiting the cluster");
                     }
                 } else {
-                    self.peers.remove(&change.get_node_id());
+                    self.peers.remove(&id);
                 }
             }
             _ => {
@@ -1159,12 +1159,14 @@ impl<S: Store + 'static> RaftNode<S> {
         }
 
         if let Ok(cs) = self.apply_conf_change(&change) {
-            info!("conf state: {cs:?}");
+            info!("conf state: {cs:?}, id: {id}, this id: {}", self.id());
             if matches!(change_type, ConfChangeType::AddNode) {
                 let store = self.mut_store();
                 store.set_conf_state(&cs)?;
-                let snap = self.generate_snapshot_sync().await?;
-                self.set_snapshot(snap);
+                if id != self.id() {
+                    let snap = self.generate_snapshot_sync().await?;
+                    self.set_snapshot(snap);
+                }
             } else {
                 let store = self.mut_store();
                 store.set_conf_state(&cs)?;
