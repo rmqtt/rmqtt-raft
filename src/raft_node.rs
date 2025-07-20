@@ -1163,6 +1163,8 @@ impl<S: Store + 'static> RaftNode<S> {
             if matches!(change_type, ConfChangeType::AddNode) {
                 let store = self.mut_store();
                 store.set_conf_state(&cs)?;
+                let snap = self.generate_snapshot_sync().await?;
+                self.set_snapshot(snap);
             } else {
                 let store = self.mut_store();
                 store.set_conf_state(&cs)?;
@@ -1282,12 +1284,36 @@ impl<S: Store + 'static> RaftNode<S> {
         if Instant::now() > self.last_snap_time + self.cfg.snapshot_interval {
             self.last_snap_time = Instant::now();
             info!("gen snapshot start");
-            self.gen_snapshot()?;
+            self.generate_snapshot_async()?;
         }
         Ok(())
     }
 
-    fn gen_snapshot(&mut self) -> Result<()> {
+    async fn generate_snapshot_sync(&mut self) -> Result<Snapshot> {
+        let last_applied = self.raft.raft_log.applied;
+        let last_term = self.raft.raft_log.term(last_applied).unwrap_or(0);
+        let mut snapshot = self.mut_store().create_snapshot(last_applied, last_term)?;
+
+        let now = Instant::now();
+        let snap = match self.store.snapshot().await {
+            Err(e) => {
+                log::error!("gen snapshot error, {e:?}");
+                return Err(e);
+            }
+            Ok(snap) => snap,
+        };
+        info!(
+            "gen snapshot cost time: {:?}, snapshot len: {}, last_applied: {last_applied}",
+            now.elapsed(),
+            snap.len()
+        );
+
+        snapshot.set_data(snap);
+
+        Ok(snapshot)
+    }
+
+    fn generate_snapshot_async(&mut self) -> Result<()> {
         let store = self.store.clone();
         let mut tx = self.snd.clone();
         let last_applied = self.raft.raft_log.applied;
