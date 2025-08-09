@@ -810,7 +810,8 @@ impl<S: Store + 'static> RaftNode<S> {
 
     #[inline]
     fn is_busy(&self) -> bool {
-        self.sending_raft_messages.load(Ordering::SeqCst) > 500
+        self.sending_raft_messages.load(Ordering::SeqCst)
+            > self.cfg.raft_cfg.max_inflight_msgs as isize
             || self.timeout_recorder.recent_get() > 0
     }
 
