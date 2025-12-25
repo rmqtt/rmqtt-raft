@@ -230,7 +230,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         }
         None => {
             info!(logger, "running in leader mode");
-            let handle = tokio::spawn(raft.lead(options.id));
+            let handle = tokio::spawn(raft.lead(options.id, options.raft_laddr));
             (handle, mailbox)
         }
     };
