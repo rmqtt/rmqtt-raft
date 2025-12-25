@@ -464,8 +464,8 @@ impl<S: Store + Send + Sync + 'static> Raft<S> {
     /// # Returns
     ///
     /// A `Result<()>` indicating success or failure during the process.
-    pub async fn lead(self, node_id: u64) -> Result<()> {
-        let node = RaftNode::new_leader(
+    pub async fn lead(self, node_id: u64, node_addr: String) -> Result<()> {
+        let mut node = RaftNode::new_leader(
             self.rx,
             self.tx.clone(),
             node_id,
@@ -474,7 +474,7 @@ impl<S: Store + Send + Sync + 'static> Raft<S> {
             self.cfg.clone(),
         )
         .await?;
-
+        node.add_peer(&node_addr, node_id);
         let server = RaftServer::new(self.tx, self.laddr, self.cfg.clone());
         let server_handle = async {
             if let Err(e) = server.run().await {
