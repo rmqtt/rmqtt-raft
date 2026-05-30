@@ -1,0 +1,29 @@
+syntax = "proto3";
+package nested;
+
+message Event {
+    enum LogType {
+        UNKNOWN = 0;
+    }
+
+    message Row {
+        LogType type = 3;
+
+        enum OpType {
+            UNKNOWN = 0;
+        }
+        OpType op_type = 4;
+    }
+
+    message Entries {
+        repeated Row entries = 1;
+    }
+
+    oneof event {
+        Entries entries = 3;
+    }
+}
+
+message NoopEvent {
+    repeated Event events = 1;
+}
