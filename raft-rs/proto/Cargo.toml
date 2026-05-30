@@ -1,6 +1,6 @@
 [package]
-name = "raft-proto"
-version = "0.7.0"
+name = "rmqtt-raft-proto"
+version = "0.8.0"
 authors = ["The TiKV Project Developers"]
 edition = "2021"
 license = "Apache-2.0"
@@ -18,7 +18,7 @@ protobuf-codec = ["protobuf-build/protobuf-codec", "bytes", "protobuf/bytes"]
 prost-codec = ["protobuf-build/prost-codec", "prost", "lazy_static"]
 
 [build-dependencies]
-protobuf-build = { path = "./protobuf-build", default-features = false }
+protobuf-build = {package = "rmqtt-protobuf-build", path = "./protobuf-build", version = "0.16.0", default-features = false }
 
 [dependencies]
 bytes = { version = "1", optional = true }

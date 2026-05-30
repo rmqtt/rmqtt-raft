@@ -1,6 +1,6 @@
 [package]
 name = "rmqtt-raft"
-version = "0.7.0"
+version = "0.7.1"
 authors = ["rmqtt <rmqttd@126.com>"]
 edition = "2021"
 license = "MIT OR Apache-2.0"
@@ -21,7 +21,7 @@ reuseport = ["socket2", "tokio-stream"]
 reuseaddr = ["socket2", "tokio-stream"]
 
 [dependencies]
-tikv-raft = {package = "raft", path = "./raft-rs", features = [
+tikv-raft = {package = "rmqtt-raft-core", path = "./raft-rs", version = "0.8.0", features = [
     "prost-codec",
 ], default-features = false }
 tokio = { version = "1", default-features = false, features = ["macros"] }
