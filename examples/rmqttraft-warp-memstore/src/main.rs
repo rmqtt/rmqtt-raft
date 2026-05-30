@@ -1,10 +1,9 @@
-#[macro_use]
 extern crate slog;
 extern crate slog_async;
 extern crate slog_term;
 
 use async_trait::async_trait;
-use bincode::{deserialize, serialize};
+use postcard::{from_bytes, to_stdvec};
 use rmqtt_raft::{Config, Mailbox, Raft, Result as RaftResult, Store};
 use serde::{Deserialize, Serialize};
 use slog::info;
@@ -53,11 +52,11 @@ impl HashStore {
 #[async_trait]
 impl Store for HashStore {
     async fn apply(&mut self, message: &[u8]) -> RaftResult<Vec<u8>> {
-        let message: Message = deserialize(message).unwrap();
+        let message: Message = from_bytes(message).unwrap();
         let message: Vec<u8> = match message {
             Message::Insert { key, value } => {
                 let mut db = self.0.write().unwrap();
-                let v = serialize(&value).unwrap();
+                let v = to_stdvec(&value).unwrap();
                 // log::info!("{key}={value}");
                 db.insert(key, value);
                 v
@@ -68,11 +67,11 @@ impl Store for HashStore {
     }
 
     async fn query(&self, query: &[u8]) -> RaftResult<Vec<u8>> {
-        let query: Message = deserialize(query).unwrap();
+        let query: Message = from_bytes(query).unwrap();
         let data: Vec<u8> = match query {
             Message::Get { key } => {
                 if let Some(val) = self.get(&key) {
-                    serialize(&val).unwrap()
+                    to_stdvec(&val).unwrap()
                 } else {
                     Vec::new()
                 }
@@ -83,7 +82,7 @@ impl Store for HashStore {
     }
 
     async fn snapshot(&self) -> RaftResult<Vec<u8>> {
-        let data = serialize(&self.0.read().unwrap().clone())?;
+        let data = to_stdvec(&self.0.read().unwrap().clone())?;
         log::info!("snapshot len: {}", data.len());
         Ok(data)
     }
@@ -91,7 +90,7 @@ impl Store for HashStore {
     async fn restore(&mut self, snapshot: &[u8]) -> RaftResult<()> {
         log::info!("restore len: {}", snapshot.len());
         if !snapshot.is_empty() {
-            let new: HashMap<String, String> = deserialize(snapshot).unwrap();
+            let new: HashMap<String, String> = from_bytes(snapshot).unwrap();
             let mut db = self.0.write().unwrap();
             let _ = std::mem::replace(&mut *db, new);
         }
@@ -116,11 +115,11 @@ async fn put(
 ) -> Result<impl warp::Reply, Infallible> {
     let value = format!("{value}-{}", incr_one());
     let message = Message::Insert { key, value };
-    let message = serialize(&message).unwrap();
+    let message = to_stdvec(&message).unwrap();
     let result = mailbox.send_proposal(message).await;
     match result {
         Ok(r) => {
-            let result: String = deserialize(&r).unwrap();
+            let result: String = from_bytes(&r).unwrap();
             Ok(reply::json(&result))
         }
         Err(e) => Ok(reply::json(&format!("put error, {e:?}"))),
@@ -190,7 +189,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         .overflow_strategy(OverflowStrategy::Block)
         .build()
         .fuse();
-    let logger = slog::Logger::root(drain, slog_o!("version" => env!("CARGO_PKG_VERSION")));
+    let logger = slog::Logger::root(drain, slog::o!("version" => env!("CARGO_PKG_VERSION")));
 
     // converts log to slog
     #[allow(clippy::let_unit_value)]

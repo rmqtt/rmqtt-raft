@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  pull_request:
+
+env:
+  RUST_BACKTRACE: 1
+  RUSTFLAGS: "--deny=warnings"
+
+jobs:
+  Linux-Stable:
+    name: Linux-Stable
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+    - run: rustup component add rustfmt clippy
+    - run: which cargo && cargo version
+    - run: cargo fmt -- --check
+    - run: cargo clippy --all
+    - run: cargo test --all -- --nocapture
+    - run: cargo test --no-default-features --features prost-codec --all -- --nocapture
+    - run: cargo test --no-default-features --features grpcio-protobuf-codec --all -- --nocapture
+    - run: cargo test --no-default-features --features grpcio-prost-codec --all -- --nocapture
+
+  Linux-Nightly:
+    name: Linux-Nightly
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+    - run: rustup default nightly
+    - run: which cargo && cargo version
+    - run: cargo test --all -- --nocapture
+    - run: cargo test --no-default-features --features prost-codec --all -- --nocapture
+    - run: cargo test --no-default-features --features grpcio-protobuf-codec --all -- --nocapture
+    - run: cargo test --no-default-features --features grpcio-prost-codec --all -- --nocapture

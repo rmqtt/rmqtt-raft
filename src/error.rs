@@ -61,9 +61,9 @@ impl From<tokio::io::Error> for Error {
     }
 }
 
-impl From<bincode::Error> for Error {
-    fn from(e: bincode::Error) -> Self {
-        Self::Other(e)
+impl From<postcard::Error> for Error {
+    fn from(e: postcard::Error) -> Self {
+        Self::Other(Box::new(e))
     }
 }
 

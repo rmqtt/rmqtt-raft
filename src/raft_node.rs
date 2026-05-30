@@ -5,13 +5,13 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::anyhow;
-use bincode::{deserialize, serialize};
 use box_counter::Counter;
 use bytestring::ByteString;
 use futures::channel::{mpsc, oneshot};
 use futures::SinkExt;
 use futures::StreamExt;
 use log::*;
+use postcard::{from_bytes, to_stdvec};
 use prost::Message as _;
 use scopeguard::guard;
 use tikv_raft::eraftpb::{ConfChange, ConfChangeType, Entry, EntryType, Message as RaftMessage};
@@ -126,7 +126,7 @@ impl QuerySender {
             });
             match client.send_query(message_request).await {
                 Ok(grpc_response) => {
-                    let raft_response = match deserialize(&grpc_response.into_inner().inner) {
+                    let raft_response = match from_bytes(&grpc_response.into_inner().inner) {
                         Ok(resp) => resp,
                         Err(e) => {
                             warn!(
@@ -794,8 +794,8 @@ impl<S: Store + 'static> RaftNode<S> {
         if let Some((data, reply_chans)) = merger.take() {
             let seq = self.seq.fetch_add(1, Ordering::Relaxed);
             self.uncommitteds.insert(seq, reply_chans);
-            let seq = serialize(&seq).map_err(|e| anyhow!(e))?;
-            let data = serialize(&data).map_err(|e| anyhow!(e))?;
+            let seq = to_stdvec(&seq).map_err(|e| anyhow!(e))?;
+            let data = to_stdvec(&data).map_err(|e| anyhow!(e))?;
             self.propose(seq, data)?;
         }
         Ok(())
@@ -850,7 +850,7 @@ impl<S: Store + 'static> RaftNode<S> {
                         let seq = self.seq.fetch_add(1, Ordering::Relaxed);
                         self.uncommitteds
                             .insert(seq, ReplyChan::One((chan, Instant::now())));
-                        match serialize(&seq) {
+                        match to_stdvec(&seq) {
                             Ok(req) => {
                                 if let Err(e) = self.propose_conf_change(req, change) {
                                     warn!("propose_conf_change, error: {:?}", e);
@@ -1122,7 +1122,7 @@ impl<S: Store + 'static> RaftNode<S> {
     #[inline]
     async fn handle_config_change(&mut self, entry: &Entry) -> Result<()> {
         info!("handle_config_change, entry: {:?}", entry);
-        let seq: u64 = deserialize(entry.get_context())?;
+        let seq: u64 = from_bytes(entry.get_context())?;
         info!("handle_config_change, seq: {:?}", seq);
         let change = ConfChange::decode(entry.get_data())
             .map_err(|e| tonic::Status::invalid_argument(e.to_string()))?;
@@ -1133,14 +1133,14 @@ impl<S: Store + 'static> RaftNode<S> {
 
         match change_type {
             ConfChangeType::AddNode => {
-                let addr: String = deserialize(change.get_context())?;
+                let addr: String = from_bytes(change.get_context())?;
                 info!("adding {} ({}) to peers", addr, id);
                 self.add_peer(&addr, id);
             }
             ConfChangeType::RemoveNode => {
                 let ctx = change.get_context();
                 let typ = if !ctx.is_empty() {
-                    deserialize(change.get_context())?
+                    from_bytes(change.get_context())?
                 } else {
                     RemoveNodeType::Normal
                 };
@@ -1197,7 +1197,7 @@ impl<S: Store + 'static> RaftNode<S> {
 
     #[inline]
     async fn handle_normal(&mut self, entry: &Entry) -> Result<()> {
-        let seq: u64 = deserialize(entry.get_context())?;
+        let seq: u64 = from_bytes(entry.get_context())?;
         debug!(
             "[handle_normal] seq:{}, senders.len(): {}",
             seq,
@@ -1205,7 +1205,7 @@ impl<S: Store + 'static> RaftNode<S> {
         );
 
         match (
-            deserialize::<Proposals>(entry.get_data())?,
+            from_bytes::<Proposals>(entry.get_data())?,
             self.uncommitteds.remove(&seq),
         ) {
             (Proposals::One(data), chan) => {

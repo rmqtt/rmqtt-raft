@@ -1,6 +1,6 @@
 [package]
 name = "rmqtt-raft"
-version = "0.6.0"
+version = "0.7.0"
 authors = ["rmqtt <rmqttd@126.com>"]
 edition = "2021"
 license = "MIT OR Apache-2.0"
@@ -21,7 +21,7 @@ reuseport = ["socket2", "tokio-stream"]
 reuseaddr = ["socket2", "tokio-stream"]
 
 [dependencies]
-tikv-raft = { package = "raft", version = "0.7", features = [
+tikv-raft = {package = "raft", path = "./raft-rs", features = [
     "prost-codec",
 ], default-features = false }
 tokio = { version = "1", default-features = false, features = ["macros"] }
@@ -30,8 +30,9 @@ tokio-stream = { version = "0.1", features = ["net"], optional = true }
 tonic = "0.9"
 prost = "0.11"
 futures = "0.3"
+
 async-trait = "0.1"
-bincode = "1.3"
+postcard = { version = "1.1", features = ["use-std"] }
 serde = { version = "1.0", features = ["derive"] }
 log = { version = "0.4", features = ["std"] }
 slog = "2"
@@ -43,7 +44,7 @@ anyhow = "1.0"
 once_cell = "1"
 bytestring = { version = "1.3", features = ["serde"] }
 scopeguard = "1"
-box-counter = { version = "0.3", features = ["count", "rate"] }
+box-counter = { version = "0.4", features = ["count", "rate"] }
 
 [build-dependencies]
 tonic-build = "0.9"
