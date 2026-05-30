@@ -1,6 +1,6 @@
 [package]
-name = "protobuf-build"
-version = "0.15.1"
+name = "rmqtt-protobuf-build"
+version = "0.16.0"
 authors = ["Nick Cameron <nrc@ncameron.org>"]
 edition = "2018"
 license = "Apache-2.0"
