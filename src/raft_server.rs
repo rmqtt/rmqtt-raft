@@ -2,10 +2,10 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use bincode::serialize;
 use futures::channel::{mpsc, oneshot};
 use futures::SinkExt;
 use log::{info, warn};
+use postcard::to_stdvec;
 use prost::Message as _;
 use tikv_raft::eraftpb::{ConfChange, Message as RaftMessage};
 use tokio::time::timeout;
@@ -115,14 +115,14 @@ impl RaftService for RaftServer {
                 warn!("sending wrong leader, leader_id: {leader_id}, leader_addr: {leader_addr:?}");
                 Ok(Response::new(raft_service::IdRequestReponse {
                     code: raft_service::ResultCode::WrongLeader as i32,
-                    data: serialize(&(leader_id, leader_addr))
+                    data: to_stdvec(&(leader_id, leader_addr))
                         .map_err(|e| Status::unavailable(e.to_string()))?,
                 }))
             }
             RaftResponse::RequestId { leader_id } => {
                 Ok(Response::new(raft_service::IdRequestReponse {
                     code: raft_service::ResultCode::Ok as i32,
-                    data: serialize(&leader_id).map_err(|e| Status::unavailable(e.to_string()))?,
+                    data: to_stdvec(&leader_id).map_err(|e| Status::unavailable(e.to_string()))?,
                 }))
             }
             _ => unreachable!(),
@@ -162,11 +162,11 @@ impl RaftService for RaftServer {
         match timeout(self.timeout, rx).await {
             Ok(Ok(raft_response)) => {
                 reply.inner =
-                    serialize(&raft_response).map_err(|e| Status::unavailable(e.to_string()))?;
+                    to_stdvec(&raft_response).map_err(|e| Status::unavailable(e.to_string()))?;
             }
             Ok(_) => (),
             Err(e) => {
-                reply.inner = serialize(&RaftResponse::Error("timeout".into()))
+                reply.inner = to_stdvec(&RaftResponse::Error("timeout".into()))
                     .map_err(|e| Status::unavailable(e.to_string()))?;
                 warn!("timeout waiting for reply, {:?}", e);
             }
@@ -195,7 +195,7 @@ impl RaftService for RaftServer {
             Ok(()) => {
                 let response = RaftResponse::Ok;
                 Ok(Response::new(raft_service::RaftResponse {
-                    inner: serialize(&response).map_err(|e| Status::unavailable(e.to_string()))?,
+                    inner: to_stdvec(&response).map_err(|e| Status::unavailable(e.to_string()))?,
                 }))
             }
             Err(_) => Err(Status::unavailable("error for try send message")),
@@ -223,7 +223,7 @@ impl RaftService for RaftServer {
 
         match sender.try_send(message) {
             Ok(()) => match timeout(self.timeout, rx).await {
-                Ok(Ok(raft_response)) => match serialize(&raft_response) {
+                Ok(Ok(raft_response)) => match to_stdvec(&raft_response) {
                     Ok(resp) => Ok(Response::new(raft_service::RaftResponse { inner: resp })),
                     Err(e) => {
                         warn!("serialize error, {}", e);
@@ -270,23 +270,23 @@ impl RaftService for RaftServer {
                 // if we don't receive a response after 2secs, we timeout
                 match timeout(self.timeout, rx).await {
                     Ok(Ok(raft_response)) => {
-                        reply.inner = serialize(&raft_response)
+                        reply.inner = to_stdvec(&raft_response)
                             .map_err(|e| Status::unavailable(e.to_string()))?;
                     }
                     Ok(Err(e)) => {
-                        reply.inner = serialize(&RaftResponse::Error(e.to_string()))
+                        reply.inner = to_stdvec(&RaftResponse::Error(e.to_string()))
                             .map_err(|e| Status::unavailable(e.to_string()))?;
                         warn!("send query error, {}", e);
                     }
                     Err(_e) => {
-                        reply.inner = serialize(&RaftResponse::Error("timeout".into()))
+                        reply.inner = to_stdvec(&RaftResponse::Error("timeout".into()))
                             .map_err(|e| Status::unavailable(e.to_string()))?;
                         warn!("timeout waiting for send query reply");
                     }
                 }
             }
             Err(e) => {
-                reply.inner = serialize(&RaftResponse::Error(e.to_string()))
+                reply.inner = to_stdvec(&RaftResponse::Error(e.to_string()))
                     .map_err(|e| Status::unavailable(e.to_string()))?;
                 warn!("send query error, {}", e)
             }

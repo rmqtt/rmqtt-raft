@@ -3,12 +3,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use bincode::{deserialize, serialize};
 use bytestring::ByteString;
 use futures::channel::{mpsc, oneshot};
 use futures::future::FutureExt;
 use futures::SinkExt;
 use log::{debug, info, warn};
+use postcard::{from_bytes, to_stdvec};
 use prost::Message as _;
 use tikv_raft::eraftpb::{ConfChange, ConfChangeType};
 use tokio::sync::RwLock;
@@ -42,7 +42,7 @@ impl ProposalSender {
     async fn send(self) -> Result<RaftResponse> {
         match self.client.send_proposal(self.proposal).await {
             Ok(reply) => {
-                let raft_response: RaftResponse = deserialize(&reply)?;
+                let raft_response: RaftResponse = from_bytes(&reply)?;
                 Ok(raft_response)
             }
             Err(e) => {
@@ -257,7 +257,7 @@ impl Mailbox {
         // set node id to 0, the node will set it to self when it receives it.
         change.set_node_id(0);
         change.set_change_type(ConfChangeType::RemoveNode);
-        change.set_context(serialize(&RemoveNodeType::Normal)?);
+        change.set_context(to_stdvec(&RemoveNodeType::Normal)?);
         let mut sender = self.sender.clone();
         let (chan, rx) = oneshot::channel();
         match sender.send(Message::ConfigChange { change, chan }).await {
@@ -438,14 +438,14 @@ impl<S: Store + Send + Sync + 'static> Raft<S> {
                 .into_inner();
             match response.code() {
                 ResultCode::WrongLeader => {
-                    let (leader_id, addr): (u64, Option<String>) = deserialize(&response.data)?;
+                    let (leader_id, addr): (u64, Option<String>) = from_bytes(&response.data)?;
                     if let Some(addr) = addr {
                         (leader_id, addr)
                     } else {
                         return Ok(None);
                     }
                 }
-                ResultCode::Ok => (deserialize(&response.data)?, peer_addr),
+                ResultCode::Ok => (from_bytes(&response.data)?, peer_addr),
                 ResultCode::Error => return Ok(None),
             }
         };
@@ -557,7 +557,7 @@ impl<S: Store + Send + Sync + 'static> Raft<S> {
             let mut change_remove = ConfChange::default();
             change_remove.set_node_id(node_id);
             change_remove.set_change_type(ConfChangeType::RemoveNode);
-            change_remove.set_context(serialize(&RemoveNodeType::Stale)?);
+            change_remove.set_context(to_stdvec(&RemoveNodeType::Stale)?);
             let change_remove = RiteraftConfChange {
                 inner: ConfChange::encode_to_vec(&change_remove),
             };
@@ -569,7 +569,7 @@ impl<S: Store + Send + Sync + 'static> Raft<S> {
 
             info!(
                 "change_remove raft_response: {:?}",
-                deserialize::<RaftResponse>(&raft_response.inner)?
+                from_bytes::<RaftResponse>(&raft_response.inner)?
             );
 
             // 3. Join the cluster
@@ -577,7 +577,7 @@ impl<S: Store + Send + Sync + 'static> Raft<S> {
             let mut change = ConfChange::default();
             change.set_node_id(node_id);
             change.set_change_type(ConfChangeType::AddNode);
-            change.set_context(serialize(&node_addr)?);
+            change.set_context(to_stdvec(&node_addr)?);
             // change.set_context(serialize(&node_addr)?);
 
             let change = RiteraftConfChange {
@@ -590,7 +590,7 @@ impl<S: Store + Send + Sync + 'static> Raft<S> {
             if let RaftResponse::JoinSuccess {
                 assigned_id,
                 peer_addrs,
-            } = deserialize(&raft_response.inner)?
+            } = from_bytes(&raft_response.inner)?
             {
                 info!(
                     "change_config response.assigned_id: {:?}, peer_addrs: {:?}",
