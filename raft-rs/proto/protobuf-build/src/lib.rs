@@ -219,13 +219,27 @@ impl Builder {
 
         let mut exports = String::new();
         for (module, file_name) in modules {
+            let wrapper_path = format!("{}/wrapper_{}.rs", self.out_dir, file_name);
+            let wrapper_exists = Path::new(&wrapper_path).exists();
+
             if cfg!(not(feature = "prost-codec")) {
-                if self.package_name.is_some() {
+                if wrapper_exists {
+                    // Wrapper exists (e.g., when both prost-codec and protobuf-codec
+                    // are enabled). Use nested module to include both files.
+                    writeln!(f, "pub mod {} {{", module).unwrap();
+                    writeln!(f, "    include!(\"{}.rs\");", file_name).unwrap();
+                    writeln!(f, "    include!(\"wrapper_{}.rs\");", file_name).unwrap();
+                    writeln!(f, "}}").unwrap();
+                    if self.package_name.is_some() {
+                        writeln!(exports, "pub use super::{}::*;", module).unwrap();
+                    }
+                } else if self.package_name.is_some() {
                     writeln!(exports, "pub use super::{}::*;", module).unwrap();
+                    writeln!(f, "mod {};", module).unwrap();
                 } else {
                     writeln!(f, "pub ").unwrap();
+                    writeln!(f, "mod {};", module).unwrap();
                 }
-                writeln!(f, "mod {};", module).unwrap();
                 continue;
             }
 
@@ -235,7 +249,7 @@ impl Builder {
                 level += 1;
             }
             writeln!(f, "include!(\"{}.rs\");", file_name,).unwrap();
-            if Path::new(&format!("{}/wrapper_{}.rs", self.out_dir, file_name)).exists() {
+            if wrapper_exists {
                 writeln!(f, "include!(\"wrapper_{}.rs\");", file_name,).unwrap();
             }
             writeln!(f, "{}", "}\n".repeat(level)).unwrap();
