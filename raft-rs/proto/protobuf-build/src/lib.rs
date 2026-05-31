@@ -219,7 +219,7 @@ impl Builder {
 
         let mut exports = String::new();
         for (module, file_name) in modules {
-            if cfg!(feature = "protobuf-codec") {
+            if cfg!(not(feature = "prost-codec")) {
                 if self.package_name.is_some() {
                     writeln!(exports, "pub use super::{}::*;", module).unwrap();
                 } else {
