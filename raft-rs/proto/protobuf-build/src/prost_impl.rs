@@ -2,7 +2,7 @@ use crate::wrapper::WrapperGen;
 use crate::{get_protoc, Builder};
 
 impl Builder {
-    pub fn generate_files(&self) {
+    pub fn generate_files_prost(&self) {
         std::env::set_var("PROTOC", get_protoc());
 
         #[cfg(feature = "grpcio-prost-codec")]

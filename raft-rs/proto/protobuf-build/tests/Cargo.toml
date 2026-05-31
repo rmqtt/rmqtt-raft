@@ -7,8 +7,8 @@ publish = false
 build = "build.rs"
 
 [features]
-protobuf-codec = ["protobuf-build/grpcio-protobuf-codec"]
-prost-codec = ["protobuf-build/grpcio-prost-codec"]
+protobuf-codec = ["rmqtt-protobuf-build/grpcio-protobuf-codec"]
+prost-codec = ["rmqtt-protobuf-build/grpcio-prost-codec"]
 
 [dependencies]
 protobuf = "3.7.2"
@@ -17,4 +17,4 @@ prost-derive = "0.11"
 lazy_static = "1.4"
 
 [build-dependencies]
-protobuf-build = { path = "../", default-features = false }
+rmqtt-protobuf-build = { path = "../", default-features = false }

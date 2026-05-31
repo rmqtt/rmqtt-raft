@@ -50,7 +50,7 @@ pub enum Error {
 }
 
 impl PartialEq for Error {
-    #[cfg_attr(feature = "cargo-clippy", allow(clippy::match_same_arms))]
+    #[allow(clippy::match_same_arms)]
     fn eq(&self, other: &Error) -> bool {
         match (self, other) {
             (Error::StepPeerNotFound, Error::StepPeerNotFound) => true,
@@ -90,7 +90,7 @@ pub enum StorageError {
 }
 
 impl PartialEq for StorageError {
-    #[cfg_attr(feature = "cargo-clippy", allow(clippy::match_same_arms))]
+    #[allow(clippy::match_same_arms)]
     fn eq(&self, other: &StorageError) -> bool {
         matches!(
             (self, other),
@@ -146,8 +146,8 @@ mod tests {
             Error::ConfigInvalid(String::from("other error"))
         );
         assert_eq!(
-            Error::from(io::Error::new(io::ErrorKind::Other, "oh no!")),
-            Error::from(io::Error::new(io::ErrorKind::Other, "oh yes!"))
+            Error::from(io::Error::other("oh no!")),
+            Error::from(io::Error::other("oh yes!"))
         );
         assert_ne!(
             Error::StepPeerNotFound,

@@ -6,9 +6,9 @@ use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use raft::eraftpb::ConfState;
-use raft::prelude::*;
-use raft::storage::MemStorage;
+use rmqtt_raft_core::eraftpb::ConfState;
+use rmqtt_raft_core::prelude::*;
+use rmqtt_raft_core::storage::MemStorage;
 
 use slog::{info, o};
 
@@ -138,7 +138,7 @@ fn on_ready(raft_group: &mut RawNode<MemStorage>, cbs: &mut HashMap<u8, ProposeC
                 continue;
             }
 
-            if entry.get_entry_type() == EntryType::EntryNormal {
+            if entry.entry_type() == EntryType::EntryNormal {
                 if let Some(cb) = cbs.remove(entry.data.first().unwrap()) {
                     cb();
                 }

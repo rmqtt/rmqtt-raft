@@ -2,8 +2,8 @@
 
 use crate::DEFAULT_RAFT_SETS;
 use criterion::Criterion;
-use raft::eraftpb::ConfState;
-use raft::{storage::MemStorage, Config, Raft};
+use rmqtt_raft_core::eraftpb::ConfState;
+use rmqtt_raft_core::{storage::MemStorage, Config, Raft};
 
 pub fn bench_raft(c: &mut Criterion) {
     bench_raft_new(c);
@@ -30,7 +30,7 @@ fn quick_raft(storage: MemStorage, logger: &slog::Logger) -> Raft<MemStorage> {
 pub fn bench_raft_new(c: &mut Criterion) {
     DEFAULT_RAFT_SETS.iter().for_each(|(voters, learners)| {
         c.bench_function(&format!("Raft::new ({}, {})", voters, learners), move |b| {
-            let logger = raft::default_logger();
+            let logger = rmqtt_raft_core::default_logger();
             let storage = new_storage(*voters, *learners);
             b.iter(|| quick_raft(storage.clone(), &logger))
         });
@@ -53,7 +53,7 @@ pub fn bench_raft_campaign(c: &mut Criterion) {
                 c.bench_function(
                     &format!("Raft::campaign ({}, {}, {})", voters, learners, msg),
                     move |b| {
-                        let logger = raft::default_logger();
+                        let logger = rmqtt_raft_core::default_logger();
                         let storage = new_storage(*voters, *learners);
                         b.iter(|| {
                             let mut raft = quick_raft(storage.clone(), &logger);

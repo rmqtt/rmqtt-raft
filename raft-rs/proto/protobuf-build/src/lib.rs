@@ -25,6 +25,19 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::str::from_utf8;
 
+impl Builder {
+    /// Generate protobuf files using the appropriate codec.
+    ///
+    /// When both `prost-codec` and `protobuf-codec` are enabled simultaneously,
+    /// only the `prost-codec` generator runs (prost takes priority).
+    pub fn generate_files(&self) {
+        #[cfg(feature = "prost-codec")]
+        self.generate_files_prost();
+        #[cfg(all(feature = "protobuf-codec", not(feature = "prost-codec")))]
+        self.generate_files_protobuf();
+    }
+}
+
 // We use system protoc when its version matches,
 // otherwise use the protoc from bin which we bundle with the crate.
 fn get_protoc() -> String {
@@ -206,13 +219,27 @@ impl Builder {
 
         let mut exports = String::new();
         for (module, file_name) in modules {
-            if cfg!(feature = "protobuf-codec") {
-                if self.package_name.is_some() {
+            let wrapper_path = format!("{}/wrapper_{}.rs", self.out_dir, file_name);
+            let wrapper_exists = Path::new(&wrapper_path).exists();
+
+            if cfg!(not(feature = "prost-codec")) {
+                if wrapper_exists {
+                    // Wrapper exists (e.g., when both prost-codec and protobuf-codec
+                    // are enabled). Use nested module to include both files.
+                    writeln!(f, "pub mod {} {{", module).unwrap();
+                    writeln!(f, "    include!(\"{}.rs\");", file_name).unwrap();
+                    writeln!(f, "    include!(\"wrapper_{}.rs\");", file_name).unwrap();
+                    writeln!(f, "}}").unwrap();
+                    if self.package_name.is_some() {
+                        writeln!(exports, "pub use super::{}::*;", module).unwrap();
+                    }
+                } else if self.package_name.is_some() {
                     writeln!(exports, "pub use super::{}::*;", module).unwrap();
+                    writeln!(f, "mod {};", module).unwrap();
                 } else {
                     writeln!(f, "pub ").unwrap();
+                    writeln!(f, "mod {};", module).unwrap();
                 }
-                writeln!(f, "mod {};", module).unwrap();
                 continue;
             }
 
@@ -222,7 +249,7 @@ impl Builder {
                 level += 1;
             }
             writeln!(f, "include!(\"{}.rs\");", file_name,).unwrap();
-            if Path::new(&format!("{}/wrapper_{}.rs", self.out_dir, file_name)).exists() {
+            if wrapper_exists {
                 writeln!(f, "include!(\"wrapper_{}.rs\");", file_name,).unwrap();
             }
             writeln!(f, "{}", "}\n".repeat(level)).unwrap();

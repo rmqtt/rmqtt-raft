@@ -292,7 +292,7 @@ need to update the applied index and resume `apply` later:
             continue;
         }
 
-        match entry.get_entry_type() {
+        match entry.entry_type() {
             EntryType::EntryNormal => handle_normal(entry),
             // It's recommended to always use `EntryType::EntryConfChangeV2.
             EntryType::EntryConfChange => handle_conf_change(entry),
@@ -470,14 +470,15 @@ This process is a two-phase process, during the midst of it the peer group's lea
 **two independent, possibly overlapping peer sets**.
 
 > **Note:** In order to maintain resiliency guarantees  (progress while a majority of both peer sets is
-active), it is recommended to wait until the entire peer group has exited the transition phase
-before taking old, removed peers offline.
+> active), it is recommended to wait until the entire peer group has exited the transition phase
+> before taking old, removed peers offline.
 
 */
 
-#![cfg_attr(not(feature = "cargo-clippy"), allow(unknown_lints))]
+#![cfg_attr(not(clippy), allow(unknown_lints))]
 #![allow(unexpected_cfgs)]
 #![deny(clippy::all)]
+#![allow(clippy::doc_lazy_continuation, clippy::doc_overindented_list_items)]
 #![deny(missing_docs)]
 #![recursion_limit = "128"]
 // This is necessary to support prost and rust-protobuf at the same time.
@@ -508,6 +509,7 @@ mod config;
 mod errors;
 mod log_unstable;
 mod quorum;
+/// The raft consensus algorithm implementation.
 #[cfg(test)]
 pub mod raft;
 #[cfg(not(test))]
@@ -576,23 +578,19 @@ pub mod prelude {
 #[cfg(any(test, feature = "default-logger"))]
 pub fn default_logger() -> slog::Logger {
     use slog::{o, Drain};
-    use std::sync::{Mutex, Once};
+    use std::sync::Mutex;
 
-    static LOGGER_INITIALIZED: Once = Once::new();
-    static mut LOGGER: Option<slog::Logger> = None;
+    static LOGGER: std::sync::OnceLock<slog::Logger> = std::sync::OnceLock::new();
 
-    let logger = unsafe {
-        LOGGER_INITIALIZED.call_once(|| {
-            let decorator = slog_term::TermDecorator::new().build();
-            let drain = slog_term::CompactFormat::new(decorator).build();
-            let drain = slog_envlogger::new(drain);
-            LOGGER = Some(slog::Logger::root(Mutex::new(drain).fuse(), o!()));
-        });
-        LOGGER.as_ref().unwrap()
-    };
+    let logger = LOGGER.get_or_init(|| {
+        let decorator = slog_term::TermDecorator::new().build();
+        let drain = slog_term::CompactFormat::new(decorator).build();
+        let drain = slog_envlogger::new(drain);
+        slog::Logger::root(Mutex::new(drain).fuse(), o!())
+    });
     if let Some(case) = std::thread::current()
         .name()
-        .and_then(|v| v.split(':').last())
+        .and_then(|v| v.split(':').next_back())
     {
         logger.new(o!("case" => case.to_string()))
     } else {

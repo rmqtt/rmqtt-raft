@@ -15,6 +15,7 @@
 // limitations under the License.
 
 use std::cmp;
+use std::fmt;
 
 use slog::warn;
 use slog::Logger;
@@ -58,12 +59,13 @@ pub struct RaftLog<T: Storage> {
     pub applied: u64,
 }
 
-impl<T> ToString for RaftLog<T>
+impl<T> fmt::Display for RaftLog<T>
 where
     T: Storage,
 {
-    fn to_string(&self) -> String {
-        format!(
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
             "committed={}, persisted={}, applied={}, unstable.offset={}, unstable.entries.len()={}",
             self.committed,
             self.persisted,
@@ -460,7 +462,7 @@ impl<T: Storage> RaftLog<T> {
     /// Returns the current snapshot
     pub fn snapshot(&self, request_index: u64, to: u64) -> Result<Snapshot> {
         if let Some(snap) = self.unstable.snapshot.as_ref() {
-            if snap.get_metadata().index >= request_index {
+            if snap.metadata().index >= request_index {
                 return Ok(snap.clone());
             }
         }
@@ -496,7 +498,7 @@ impl<T: Storage> RaftLog<T> {
 
     /// Attempts to commit the index and term and returns whether it did.
     pub fn maybe_commit(&mut self, max_index: u64, term: u64) -> bool {
-        if max_index > self.committed && self.term(max_index).map_or(false, |t| t == term) {
+        if max_index > self.committed && (self.term(max_index) == Ok(term)) {
             debug!(
                 self.unstable.logger,
                 "committing index {index}",
@@ -526,12 +528,12 @@ impl<T: Storage> RaftLog<T> {
         // because the first_update_index means there are snapshot or some entries whose indexes
         // are greater than or equal to the first_update_index have not been persisted yet.
         let first_update_index = match &self.unstable.snapshot {
-            Some(s) => s.get_metadata().index,
+            Some(s) => s.metadata().index,
             None => self.unstable.offset,
         };
         if index > self.persisted
             && index < first_update_index
-            && self.store.term(index).map_or(false, |t| t == term)
+            && (self.store.term(index) == Ok(term))
         {
             debug!(self.unstable.logger, "persisted index {}", index);
             self.persisted = index;
@@ -628,10 +630,10 @@ impl<T: Storage> RaftLog<T> {
             self.unstable.logger,
             "log [{log}] starts to restore snapshot [index: {snapshot_index}, term: {snapshot_term}]",
             log = self.to_string(),
-            snapshot_index = snapshot.get_metadata().index,
-            snapshot_term = snapshot.get_metadata().term,
+            snapshot_index = snapshot.metadata().index,
+            snapshot_term = snapshot.metadata().term,
         );
-        let index = snapshot.get_metadata().index;
+        let index = snapshot.metadata().index;
         assert!(index >= self.committed, "{} < {}", index, self.committed);
         // If `persisted` is greater than `committed`, reset it to `committed`.
         // It's because only the persisted entries whose index are less than `commited` can be
@@ -883,7 +885,7 @@ mod test {
         assert_eq!(raft_log.committed, unstablesnapi);
         assert_eq!(raft_log.persisted, storagesnapi);
 
-        let tests = vec![
+        let tests = [
             // cannot get term from storage
             (storagesnapi, 0),
             // cannot get term from the gap between storage ents and unstable snapshot
@@ -916,7 +918,7 @@ mod test {
             raft_log.append(&[new_entry(offset + i, i)]);
         }
 
-        let tests = vec![
+        let tests = [
             (offset - 1, 0),
             (offset, 1),
             (offset + num / 2, num / 2),
@@ -1016,7 +1018,7 @@ mod test {
             raft_log.append(new_ents);
             let unstable = raft_log.unstable_entries().to_vec();
             if let Some(e) = unstable.last() {
-                raft_log.stable_entries(e.get_index(), e.get_term());
+                raft_log.stable_entries(e.index(), e.term());
                 raft_log.mut_store().wl().append(&unstable).expect("");
             }
             let is_changed = raft_log.persisted != wpersist;
@@ -1048,7 +1050,7 @@ mod test {
     fn test_unstable_ents() {
         let l = default_logger();
         let previous_ents = vec![new_entry(1, 1), new_entry(2, 2)];
-        let tests = vec![(3, vec![]), (1, previous_ents.clone())];
+        let tests = [(3, vec![]), (1, previous_ents.clone())];
 
         for (i, &(unstable, ref wents)) in tests.iter().enumerate() {
             // append stable entries to storage
@@ -1064,7 +1066,7 @@ mod test {
 
             let ents = raft_log.unstable_entries().to_vec();
             if let Some(e) = ents.last() {
-                raft_log.stable_entries(e.get_index(), e.get_term());
+                raft_log.stable_entries(e.index(), e.term());
             }
             if &ents != wents {
                 panic!("#{}: unstableEnts = {:?}, want {:?}", i, ents, wents);
@@ -1114,7 +1116,7 @@ mod test {
             raft_log.append(&ents);
             let unstable = raft_log.unstable_entries().to_vec();
             if let Some(e) = unstable.last() {
-                raft_log.stable_entries(e.get_index(), e.get_term());
+                raft_log.stable_entries(e.index(), e.term());
                 raft_log.mut_store().wl().append(&unstable).expect("");
             }
             raft_log.maybe_persist(persisted, 1);
@@ -1515,9 +1517,9 @@ mod test {
     #[test]
     fn test_commit_to() {
         let l = default_logger();
-        let previous_ents = vec![new_entry(1, 1), new_entry(2, 2), new_entry(3, 3)];
+        let previous_ents = [new_entry(1, 1), new_entry(2, 2), new_entry(3, 3)];
         let previous_commit = 2u64;
-        let tests = vec![
+        let tests = [
             (3, 3, false),
             (1, 2, false), // never decrease
             (4, 0, true),  // commit out of range -> panic
@@ -1543,7 +1545,7 @@ mod test {
     #[test]
     fn test_compaction() {
         let l = default_logger();
-        let tests = vec![
+        let tests = [
             // out of upper bound
             (1000, vec![1001u64], vec![0usize], true),
             (
@@ -1596,7 +1598,7 @@ mod test {
             raft_log.append(&[new_entry(i + offset, 0)]);
         }
         let first = offset + 1;
-        let tests = vec![
+        let tests = [
             (first - 2, first + 1, false, true),
             (first - 1, first + 1, false, true),
             (first, first, false, false),

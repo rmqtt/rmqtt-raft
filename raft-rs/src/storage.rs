@@ -164,7 +164,7 @@ pub trait Storage {
 #[derive(Default)]
 pub struct MemStorageCore {
     raft_state: RaftState,
-    // entries[i] has raft log position i+snapshot.get_metadata().index
+    // entries[i] has raft log position i+snapshot.metadata().index
     entries: Vec<Entry>,
     // Metadata of the last snapshot received.
     snapshot_metadata: SnapshotMetadata,
@@ -511,7 +511,7 @@ impl Storage for MemStorage {
             Err(Error::Store(StorageError::SnapshotTemporarilyUnavailable))
         } else {
             let mut snap = core.snapshot();
-            if snap.get_metadata().index < request_index {
+            if snap.metadata().index < request_index {
                 snap.mut_metadata().index = request_index;
             }
             Ok(snap)
@@ -538,7 +538,7 @@ mod test {
     }
 
     fn size_of<T: PbMessage>(m: &T) -> u32 {
-        m.compute_size()
+        m.compute_size() as u32
     }
 
     fn new_snapshot(index: u64, term: u64, voters: Vec<u64>) -> Snapshot {
@@ -579,7 +579,7 @@ mod test {
             new_entry(5, 5),
             new_entry(6, 6),
         ];
-        let max_u64 = u64::max_value();
+        let max_u64 = u64::MAX;
         let mut tests = vec![
             (
                 2,

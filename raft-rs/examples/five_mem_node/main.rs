@@ -12,9 +12,9 @@ use std::time::{Duration, Instant};
 use std::{str, thread};
 
 use protobuf::Message as PbMessage;
-use raft::storage::MemStorage;
-use raft::{prelude::*, StateRole};
 use regex::Regex;
+use rmqtt_raft_core::storage::MemStorage;
+use rmqtt_raft_core::{prelude::*, StateRole};
 
 use slog::{error, info, o};
 
@@ -285,7 +285,7 @@ fn on_ready(
                     // From new elected leaders.
                     continue;
                 }
-                if let EntryType::EntryConfChange = entry.get_entry_type() {
+                if let EntryType::EntryConfChange = entry.entry_type() {
                     // For conf change messages, make them effective.
                     let mut cc = ConfChange::default();
                     cc.merge_from_bytes(&entry.data).unwrap();
@@ -355,7 +355,7 @@ fn example_config() -> Config {
 
 // The message can be used to initialize a raft node or not.
 fn is_initial_msg(msg: &Message) -> bool {
-    let msg_type = msg.get_msg_type();
+    let msg_type = msg.msg_type();
     msg_type == MessageType::MsgRequestVote
         || msg_type == MessageType::MsgRequestPreVote
         || (msg_type == MessageType::MsgHeartbeat && msg.commit == 0)

@@ -374,7 +374,7 @@ impl<T: Storage> RawNode<T> {
     /// If the node enters joint state with `auto_leave` set to true, it's
     /// caller's responsibility to propose an empty conf change again to force
     /// leaving joint state.
-    #[cfg_attr(feature = "cargo-clippy", allow(clippy::needless_pass_by_value))]
+    #[allow(clippy::needless_pass_by_value)]
     pub fn propose_conf_change(&mut self, context: Vec<u8>, cc: impl ConfChangeI) -> Result<()> {
         let (data, ty) = if let Some(cc) = cc.as_v1() {
             (cc.write_to_bytes()?, EntryType::EntryConfChange)
@@ -401,10 +401,10 @@ impl<T: Storage> RawNode<T> {
     /// Step advances the state machine using the given message.
     pub fn step(&mut self, m: Message) -> Result<()> {
         // Ignore unexpected local messages receiving over network
-        if is_local_msg(m.get_msg_type()) {
+        if is_local_msg(m.msg_type()) {
             return Err(Error::StepLocalMsg);
         }
-        if self.raft.prs().get(m.from).is_some() || !is_response_msg(m.get_msg_type()) {
+        if self.raft.prs().get(m.from).is_some() || !is_response_msg(m.msg_type()) {
             return self.raft.step(m);
         }
         Err(Error::StepPeerNotFound)
@@ -456,8 +456,8 @@ impl<T: Storage> RawNode<T> {
         // Update raft uncommitted entries size
         raft.reduce_uncommitted_size(&rd.committed_entries);
         if let Some(e) = rd.committed_entries.last() {
-            assert!(self.commit_since_index < e.get_index());
-            self.commit_since_index = e.get_index();
+            assert!(self.commit_since_index < e.index);
+            self.commit_since_index = e.index;
         }
 
         if !raft.msgs.is_empty() {
@@ -516,8 +516,8 @@ impl<T: Storage> RawNode<T> {
 
         if let Some(snapshot) = &raft.raft_log.unstable_snapshot() {
             rd.snapshot = snapshot.clone();
-            assert!(self.commit_since_index <= rd.snapshot.get_metadata().index);
-            self.commit_since_index = rd.snapshot.get_metadata().index;
+            assert!(self.commit_since_index <= rd.snapshot.metadata().index);
+            self.commit_since_index = rd.snapshot.metadata().index;
             // If there is a snapshot, the latter entries can not be persisted
             // so there is no committed entries.
             assert!(
@@ -527,10 +527,7 @@ impl<T: Storage> RawNode<T> {
                 "has snapshot but also has committed entries since {}",
                 self.commit_since_index
             );
-            rd_record.snapshot = Some((
-                rd.snapshot.get_metadata().index,
-                rd.snapshot.get_metadata().term,
-            ));
+            rd_record.snapshot = Some((rd.snapshot.metadata().index, rd.snapshot.metadata().term));
             rd.must_sync = true;
         }
 
@@ -538,7 +535,7 @@ impl<T: Storage> RawNode<T> {
         if let Some(e) = rd.entries.last() {
             // If the last entry exists, the entries must not empty, vice versa.
             rd.must_sync = true;
-            rd_record.last_entry = Some((e.get_index(), e.get_term()));
+            rd_record.last_entry = Some((e.index, e.term));
         }
 
         // Leader can send messages immediately to make replication concurrently.
@@ -571,7 +568,7 @@ impl<T: Storage> RawNode<T> {
             return true;
         }
 
-        if self.snap().map_or(false, |s| !s.is_empty()) {
+        if self.snap().is_some_and(|s| !s.is_empty()) {
             return true;
         }
 
