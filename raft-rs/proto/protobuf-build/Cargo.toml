@@ -1,11 +1,11 @@
 [package]
 name = "rmqtt-protobuf-build"
-version = "0.16.0"
-authors = ["Nick Cameron <nrc@ncameron.org>"]
+version = "0.16.1"
+authors = ["Nick Cameron <nrc@ncameron.org>", "rmqtt <rmqttd@126.com>"]
 edition = "2018"
 license = "Apache-2.0"
-repository = "https://github.com/tikv/protobuf-build"
-homepage = "https://github.com/tikv/protobuf-build"
+repository = "https://github.com/rmqtt/rmqtt-raft/tree/main/raft-rs/proto/protobuf-build"
+homepage = "https://github.com/rmqtt/rmqtt-raft/tree/main/raft-rs/proto/protobuf-build"
 description = "Utility functions for generating Rust code from protobufs (using protobuf-rust or Prost)"
 
 [features]

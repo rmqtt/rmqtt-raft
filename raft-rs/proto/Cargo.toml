@@ -1,13 +1,12 @@
 [package]
 name = "rmqtt-raft-proto"
 version = "0.8.0"
-authors = ["The TiKV Project Developers"]
+authors = ["The TiKV Project Developers", "rmqtt <rmqttd@126.com>"]
 edition = "2021"
 license = "Apache-2.0"
 keywords = ["raft", "distributed-systems", "ha"]
-repository = "https://github.com/pingcap/raft-rs"
-homepage = "https://github.com/pingcap/raft-rs"
-documentation = "https://docs.rs/raft-proto"
+repository = "https://github.com/rmqtt/rmqtt-raft/tree/main/raft-rs/proto"
+homepage = "https://github.com/rmqtt/rmqtt-raft/tree/main/raft-rs/proto"
 description = "Protocol definitions for the rust language implementation of the Raft algorithm."
 categories = ["algorithms", "database-implementations"]
 build = "build.rs"
