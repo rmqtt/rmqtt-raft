@@ -26,7 +26,7 @@ mod protos {
     impl Snapshot {
         /// For a given snapshot, determine if it's empty or not.
         pub fn is_empty(&self) -> bool {
-            self.get_metadata().index == 0
+            self.metadata.as_ref().map_or(true, |m| m.index == 0)
         }
     }
 }
@@ -48,8 +48,8 @@ pub mod util {
     {
         fn from((voters, learners): (Iter1, Iter2)) -> Self {
             let mut conf_state = ConfState::default();
-            conf_state.mut_voters().extend(voters.into_iter());
-            conf_state.mut_learners().extend(learners.into_iter());
+            conf_state.mut_voters().extend(voters);
+            conf_state.mut_learners().extend(learners);
             conf_state
         }
     }

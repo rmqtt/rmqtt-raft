@@ -24,5 +24,4 @@ protobuf-build = {package = "rmqtt-protobuf-build", path = "./protobuf-build", v
 bytes = { version = "1", optional = true }
 lazy_static = { version = "1", optional = true }
 prost = { version = "0.11", optional = true }
-#protobuf = { version = "3.7.2", optional = true }
 protobuf = "3.7.2"

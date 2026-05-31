@@ -496,6 +496,7 @@ impl FieldKind {
                 result.clear = Some("0".to_owned());
                 result.set = Some("v as i32".to_owned());
                 result.enum_set = true;
+                result.prost_has_unprefixed = true;
                 result.get = Some(format!(
                     "match {}::from_i32(self.{}) {{\
                         Some(e) => e,
@@ -556,6 +557,8 @@ struct FieldMethods {
     mt: MethodKind,
     take: Option<String>,
     deprecated: bool,
+    /// prost-derive 0.11 generates un-prefixed methods for bare (non-Option) enum fields
+    prost_has_unprefixed: bool,
 }
 
 impl FieldMethods {
@@ -578,6 +581,7 @@ impl FieldMethods {
             mt: MethodKind::None,
             take: None,
             deprecated,
+            prost_has_unprefixed: false,
         }
     }
 
@@ -638,11 +642,22 @@ impl FieldMethods {
         }
         // get_*
         match &self.get {
-            Some(s) => writeln!(
-                buf,
-                "{}#[inline] pub fn get_{}(&self) -> {} {{ {} }}",
-                deprecated, self.unesc_base, ref_ty, s
-            )?,
+            Some(s) => {
+                writeln!(
+                    buf,
+                    "{}#[inline] pub fn get_{}(&self) -> {} {{ {} }}",
+                    deprecated, self.unesc_base, ref_ty, s
+                )?;
+                // Also generate an un-prefixed accessor for compatibility with protobuf 3.x
+                // but only if prost-derive doesn't already generate one (e.g., for enum fields)
+                if !self.prost_has_unprefixed {
+                    writeln!(
+                        buf,
+                        "{}#[inline] pub fn {}(&self) -> {} {{ self.get_{}() }}",
+                        deprecated, self.unesc_base, ref_ty, self.unesc_base
+                    )?;
+                }
+            }
             None => {
                 if gen_opt.contains(GenOpt::TRIVIAL_GET) {
                     let rf = match &self.ref_ty {
@@ -653,7 +668,15 @@ impl FieldMethods {
                         buf,
                         "{}#[inline] pub fn get_{}(&self) -> {} {{ {}self.{} }}",
                         deprecated, self.unesc_base, ref_ty, rf, self.name
-                    )?
+                    )?;
+                    // Also generate an un-prefixed accessor for compatibility with protobuf 3.x
+                    if !self.prost_has_unprefixed {
+                        writeln!(
+                            buf,
+                            "{}#[inline] pub fn {}(&self) -> {} {{ self.get_{}() }}",
+                            deprecated, self.unesc_base, ref_ty, self.unesc_base
+                        )?;
+                    }
                 }
             }
         }
@@ -736,7 +759,7 @@ fn type_in_expr_context(s: &str) -> String {
     let last_segment = parsed.path.segments.last_mut().unwrap();
     if !last_segment.arguments.is_empty() {
         if let PathArguments::AngleBracketed(ref mut a) = last_segment.arguments {
-            if a.colon2_token == None {
+            if a.colon2_token.is_none() {
                 a.colon2_token = Some(Token![::](Span::call_site()));
             }
         }
