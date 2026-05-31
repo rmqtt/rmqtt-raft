@@ -419,8 +419,10 @@ impl FieldKind {
             }
             FieldKind::Message => {
                 let unboxed_type = unwrap_type(ty, "Box");
-                if ty != &unboxed_type {
-                    result.ref_ty = RefType::Deref(unboxed_type.into_token_stream().to_string());
+                let ty_str = ty.into_token_stream().to_string();
+                let unboxed_str = unboxed_type.into_token_stream().to_string();
+                if ty_str != unboxed_str {
+                    result.ref_ty = RefType::Deref(unboxed_str);
                 }
             }
             FieldKind::Int => {
