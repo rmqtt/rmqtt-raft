@@ -25,6 +25,19 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::str::from_utf8;
 
+impl Builder {
+    /// Generate protobuf files using the appropriate codec.
+    ///
+    /// When both `prost-codec` and `protobuf-codec` are enabled simultaneously,
+    /// only the `prost-codec` generator runs (prost takes priority).
+    pub fn generate_files(&self) {
+        #[cfg(feature = "prost-codec")]
+        self.generate_files_prost();
+        #[cfg(all(feature = "protobuf-codec", not(feature = "prost-codec")))]
+        self.generate_files_protobuf();
+    }
+}
+
 // We use system protoc when its version matches,
 // otherwise use the protoc from bin which we bundle with the crate.
 fn get_protoc() -> String {

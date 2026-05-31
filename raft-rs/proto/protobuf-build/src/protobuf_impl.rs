@@ -17,7 +17,7 @@ use crate::get_protoc;
 use crate::Builder;
 
 impl Builder {
-    pub fn generate_files(&self) {
+    pub fn generate_files_protobuf(&self) {
         let mut cmd = Command::new(get_protoc());
         let desc_file = format!("{}/mod.desc", self.out_dir);
         for i in &self.includes {
