@@ -1,6 +1,6 @@
 [package]
 name = "rmqtt-grpcio-compiler"
-version = "0.14.1"
+version = "0.15.0"
 edition = "2018"
 authors = ["The TiKV Project Developers", "rmqtt <rmqttd@126.com>"]
 license = "Apache-2.0"
@@ -17,9 +17,9 @@ prost-codec = ["prost-build", "prost-types", "prost", "derive-new", "tempfile"]
 
 [dependencies]
 protobuf = { version = "3.7.2", optional = true }
-prost = { version = "0.11", optional = true }
-prost-build = { version = "0.11", optional = true }
-prost-types = { version = "0.11", optional = true }
+prost = { version = "0.14.3", optional = true }
+prost-build = { version = "0.14.3", optional = true }
+prost-types = { version = "0.14.3", optional = true }
 derive-new = { version = "0.5", optional = true }
 tempfile = { version = "3.0", optional = true }
 

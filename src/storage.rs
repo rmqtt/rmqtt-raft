@@ -100,7 +100,7 @@ impl LogStore for MemStorage {
     #[inline]
     fn set_hard_state(&mut self, hard_state: &HardState) -> Result<()> {
         let mut store = self.core.wl();
-        store.set_hardstate(hard_state.clone());
+        store.set_hardstate(*hard_state);
         Ok(())
     }
 
@@ -117,7 +117,7 @@ impl LogStore for MemStorage {
     #[inline]
     fn set_hard_state_comit(&mut self, comit: u64) -> Result<()> {
         let mut store = self.core.wl();
-        let mut hard_state = store.hard_state().clone();
+        let mut hard_state = *store.hard_state();
         hard_state.set_commit(comit);
         store.set_hardstate(hard_state);
         Ok(())
