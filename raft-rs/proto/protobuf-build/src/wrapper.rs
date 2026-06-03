@@ -398,9 +398,9 @@ impl FieldKind {
                 result.get = Some(match &**fk {
                     FieldKind::Enumeration(t) => format!(
                         "match self.{} {{
-                            Some(v) => match {}::from_i32(v) {{\
-                                Some(e) => e,
-                                None => panic!(\"Unknown enum variant: {{}}\", v),
+                            Some(v) => match <{} as ::std::convert::TryFrom<i32>>::try_from(v) {{\
+                                Ok(e) => e,
+                                Err(_) => panic!(\"Unknown enum variant: {{}}\", v),
                             }},
                             None => {}::default(),
                         }}",
@@ -500,9 +500,9 @@ impl FieldKind {
                 result.enum_set = true;
                 result.prost_has_unprefixed = true;
                 result.get = Some(format!(
-                    "match {}::from_i32(self.{}) {{\
-                        Some(e) => e,
-                        None => panic!(\"Unknown enum variant: {{}}\", self.{1}),
+                    "match <{} as ::std::convert::TryFrom<i32>>::try_from(self.{}) {{\
+                        Ok(e) => e,
+                        Err(_) => panic!(\"Unknown enum variant: {{}}\", self.{1}),
                     }}",
                     type_in_expr_context(enum_type),
                     result.name,

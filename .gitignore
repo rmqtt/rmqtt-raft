@@ -12,3 +12,4 @@ Cargo.lock
 /examples/rmqttraft-warp-memstore/.idea/rmqttraft-warp-memstore.iml
 /examples/rmqttraft-warp-memstore/.idea/vcs.xml
 /CODEBUDDY.md
+/.workbuddy/memory
