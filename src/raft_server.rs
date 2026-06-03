@@ -62,7 +62,6 @@ impl RaftServer {
         let svc = RaftServiceServer::new(self)
             .max_decoding_message_size(_cfg.grpc_message_size)
             .max_encoding_message_size(_cfg.grpc_message_size);
-        let server = Server::builder().add_service(svc);
 
         #[cfg(any(feature = "reuseport", feature = "reuseaddr"))]
         #[cfg(all(feature = "socket2", feature = "tokio-stream"))]
@@ -73,10 +72,10 @@ impl RaftServer {
                 _cfg.reuseport
             );
             let listener = raft_service::bind(laddr, 1024, _cfg.reuseaddr, _cfg.reuseport)?;
-            server.serve_with_incoming(listener).await?;
+            Server::builder().serve_with_incoming(svc, listener).await?;
         }
         #[cfg(not(any(feature = "reuseport", feature = "reuseaddr")))]
-        server.serve(laddr).await?;
+        Server::builder().serve(laddr, svc).await?;
 
         info!("server has quit");
         Ok(())
