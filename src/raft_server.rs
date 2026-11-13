@@ -8,6 +8,7 @@ use log::{info, warn};
 use postcard::to_stdvec;
 use prost::Message as _;
 use tikv_raft::eraftpb::{ConfChange, Message as RaftMessage};
+use tokio::sync::watch;
 use tokio::time::timeout;
 use tonic::transport::Server;
 use tonic::{Request, Response, Status};
@@ -18,6 +19,17 @@ use crate::raft_service::{
     self, ConfChange as RiteraftConfChange, Empty, Message as RiteraftMessage,
 };
 use crate::{error, Config};
+
+async fn wait_for_shutdown(mut shutdown: watch::Receiver<bool>) {
+    while !*shutdown.borrow() {
+        if shutdown.changed().await.is_err() {
+            // Dropping every Mailbox is not a lifecycle command. Keep serving
+            // unless an explicit shutdown signal was sent.
+            std::future::pending::<()>().await;
+        }
+    }
+    info!("raft gRPC shutdown requested");
+}
 
 /// A gRPC server that handles Raft-related requests.
 pub struct RaftServer {
@@ -55,13 +67,16 @@ impl RaftServer {
     ///
     /// # Returns
     /// Returns a `Result` indicating whether the server started successfully or if an error occurred.
-    pub async fn run(self) -> error::Result<()> {
+    pub async fn run(self, shutdown: watch::Receiver<bool>) -> error::Result<()> {
         let laddr = self.laddr;
         let _cfg = self.cfg.clone();
         info!("listening gRPC requests on: {}", laddr);
         let svc = RaftServiceServer::new(self)
             .max_decoding_message_size(_cfg.grpc_message_size)
             .max_encoding_message_size(_cfg.grpc_message_size);
+        let server = Server::builder().add_service(svc);
+
+        let shutdown_signal = wait_for_shutdown(shutdown);
 
         #[cfg(any(feature = "reuseport", feature = "reuseaddr"))]
         #[cfg(all(feature = "socket2", feature = "tokio-stream"))]
@@ -72,10 +87,12 @@ impl RaftServer {
                 _cfg.reuseport
             );
             let listener = raft_service::bind(laddr, 1024, _cfg.reuseaddr, _cfg.reuseport)?;
-            Server::builder().serve_with_incoming(svc, listener).await?;
+            server
+                .serve_with_incoming_shutdown(listener, shutdown_signal)
+                .await?;
         }
         #[cfg(not(any(feature = "reuseport", feature = "reuseaddr")))]
-        Server::builder().serve(laddr, svc).await?;
+        server.serve_with_shutdown(laddr, shutdown_signal).await?;
 
         info!("server has quit");
         Ok(())
@@ -292,5 +309,33 @@ impl RaftService for RaftServer {
         }
 
         Ok(Response::new(reply))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn closed_channel_does_not_request_shutdown() {
+        let (sender, receiver) = watch::channel(false);
+        drop(sender);
+
+        assert!(
+            timeout(Duration::from_millis(20), wait_for_shutdown(receiver))
+                .await
+                .is_err(),
+            "closing the signal channel unexpectedly requested shutdown"
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_signal_requests_shutdown() {
+        let (sender, receiver) = watch::channel(false);
+        sender.send(true).unwrap();
+
+        timeout(Duration::from_millis(20), wait_for_shutdown(receiver))
+            .await
+            .expect("explicit shutdown signal was not observed");
     }
 }

@@ -37,6 +37,10 @@ pub struct Config {
     /// The timeout duration for gRPC calls.
     pub grpc_timeout: Duration,
 
+    /// The maximum time a joining node retries transient failures while
+    /// establishing its initial gRPC connection to the leader.
+    pub join_connect_retry_timeout: Duration,
+
     /// The maximum number of concurrent gRPC calls.
     pub grpc_concurrency_limit: usize,
 
@@ -81,6 +85,7 @@ impl Default for Config {
             reuseport: false,
 
             grpc_timeout: Duration::from_secs(6),
+            join_connect_retry_timeout: Duration::from_secs(20),
             grpc_concurrency_limit: 200,
             grpc_message_size: 50 * 1024 * 1024, // 50 MB
             grpc_breaker_threshold: 4,

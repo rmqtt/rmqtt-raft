@@ -24,7 +24,7 @@ reuseaddr = ["socket2", "tokio-stream"]
 tikv-raft = {package = "rmqtt-raft-core", path = "./raft-rs", version = "0.8.1", features = [
     "prost-codec",
 ], default-features = false }
-tokio = { version = "1", default-features = false, features = ["macros"] }
+tokio = { version = "1", default-features = false, features = ["macros", "sync"] }
 socket2 = { version = "0.5", features = ["all"], optional = true }
 tokio-stream = { version = "0.1", features = ["net"], optional = true }
 tonic = "0.13"

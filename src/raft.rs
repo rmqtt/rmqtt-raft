@@ -1,6 +1,6 @@
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use bytestring::ByteString;
@@ -11,7 +11,7 @@ use log::{debug, info, warn};
 use postcard::{from_bytes, to_stdvec};
 use prost::Message as _;
 use tikv_raft::eraftpb::{ConfChange, ConfChangeType};
-use tokio::sync::RwLock;
+use tokio::sync::{watch, RwLock};
 use tokio::time::timeout;
 use tonic::Request;
 
@@ -20,10 +20,106 @@ use crate::message::{Message, RaftResponse, RemoveNodeType, Status};
 use crate::raft_node::{Peer, RaftNode};
 use crate::raft_server::RaftServer;
 use crate::raft_service::connect;
-use crate::raft_service::{ConfChange as RiteraftConfChange, Empty, ResultCode};
+use crate::raft_service::{
+    ConfChange as RiteraftConfChange, Empty, RaftServiceClientType, ResultCode,
+};
 use crate::Config;
 
 type DashMap<K, V> = dashmap::DashMap<K, V, ahash::RandomState>;
+
+const JOIN_CONNECT_RETRY_INITIAL_DELAY: Duration = Duration::from_millis(500);
+const JOIN_CONNECT_RETRY_MAX_DELAY: Duration = Duration::from_secs(5);
+const JOIN_CONNECT_RETRY_MAX_JITTER: u64 = 250;
+
+fn join_connect_retry_delay(
+    node_id: u64,
+    attempt: usize,
+    base_delay: Duration,
+    remaining: Duration,
+) -> Duration {
+    let jitter_millis = node_id
+        .wrapping_mul(97)
+        .wrapping_add((attempt as u64).wrapping_mul(53))
+        % (JOIN_CONNECT_RETRY_MAX_JITTER + 1);
+    let delay = base_delay
+        .saturating_add(Duration::from_millis(jitter_millis))
+        .min(JOIN_CONNECT_RETRY_MAX_DELAY);
+    delay.min(remaining)
+}
+
+async fn connect_to_join_leader(
+    peer: &Peer,
+    node_id: u64,
+    leader_addr: &str,
+    retry_timeout: Duration,
+) -> Result<RaftServiceClientType> {
+    if retry_timeout.is_zero() {
+        return peer.client().await;
+    }
+
+    let started_at = Instant::now();
+    let mut attempt = 1usize;
+    let mut base_delay = JOIN_CONNECT_RETRY_INITIAL_DELAY;
+
+    loop {
+        let remaining = retry_timeout.saturating_sub(started_at.elapsed());
+        if remaining.is_zero() {
+            warn!(
+                "raft join connection to {} timed out after {:?}",
+                leader_addr, retry_timeout
+            );
+            return Err(Error::Elapsed);
+        }
+
+        match timeout(remaining, peer.client()).await {
+            Ok(Ok(client)) => {
+                if attempt > 1 {
+                    info!(
+                        "raft join connection to {} recovered after {} attempts in {:?}",
+                        leader_addr,
+                        attempt,
+                        started_at.elapsed()
+                    );
+                }
+                return Ok(client);
+            }
+            Ok(Err(error @ Error::Grpc(_))) => {
+                let remaining = retry_timeout.saturating_sub(started_at.elapsed());
+                if remaining.is_zero() {
+                    warn!(
+                        "raft join connection to {} failed after {} attempts in {:?}: {:?}",
+                        leader_addr,
+                        attempt,
+                        started_at.elapsed(),
+                        error
+                    );
+                    return Err(error);
+                }
+
+                let retry_delay = join_connect_retry_delay(node_id, attempt, base_delay, remaining);
+                warn!(
+                    "raft join connection attempt {} to {} failed: {:?}; retrying in {:?}",
+                    attempt, leader_addr, error, retry_delay
+                );
+                tokio::time::sleep(retry_delay).await;
+                base_delay = base_delay
+                    .saturating_mul(2)
+                    .min(JOIN_CONNECT_RETRY_MAX_DELAY);
+                attempt += 1;
+            }
+            Ok(Err(error)) => return Err(error),
+            Err(_) => {
+                warn!(
+                    "raft join connection to {} timed out after {} attempts in {:?}",
+                    leader_addr,
+                    attempt,
+                    started_at.elapsed()
+                );
+                return Err(Error::Elapsed);
+            }
+        }
+    }
+}
 
 #[async_trait]
 pub trait Store: Clone + Send + Sync {
@@ -67,6 +163,7 @@ type LeaderInfoError = ByteString;
 pub struct Mailbox {
     peers: Arc<DashMap<(u64, String), Peer>>,
     sender: mpsc::Sender<Message>,
+    shutdown: watch::Sender<bool>,
     grpc_timeout: Duration,
     grpc_concurrency_limit: usize,
     grpc_message_size: usize,
@@ -89,6 +186,7 @@ impl Mailbox {
     pub(crate) fn new(
         peers: Arc<DashMap<(u64, String), Peer>>,
         sender: mpsc::Sender<Message>,
+        shutdown: watch::Sender<bool>,
         grpc_timeout: Duration,
         grpc_concurrency_limit: usize,
         grpc_message_size: usize,
@@ -98,6 +196,7 @@ impl Mailbox {
         Self {
             peers,
             sender,
+            shutdown,
             grpc_timeout,
             grpc_concurrency_limit,
             grpc_message_size,
@@ -105,6 +204,36 @@ impl Mailbox {
             grpc_breaker_retry_interval,
             leader_info: Arc::new(RwLock::new(None)),
         }
+    }
+
+    /// Gracefully stops the local Raft node and its gRPC listener.
+    ///
+    /// This is intended for explicit lifecycle management. It does not run on
+    /// the proposal or query fast paths.
+    pub async fn shutdown(&self) -> Result<()> {
+        let (tx, rx) = oneshot::channel();
+        let result = match self
+            .sender
+            .clone()
+            .send(Message::Shutdown { chan: tx })
+            .await
+        {
+            Ok(()) => match timeout(self.grpc_timeout, rx).await {
+                Ok(Ok(RaftResponse::Ok)) => Ok(()),
+                Ok(Ok(RaftResponse::Error(error))) => Err(Error::Msg(error)),
+                Ok(Ok(response)) => Err(Error::Msg(format!(
+                    "unexpected raft shutdown response: {response:?}"
+                ))),
+                Ok(Err(error)) => Err(Error::RecvError(error.to_string())),
+                Err(error) => Err(error.into()),
+            },
+            Err(error) => Err(Error::SendError(error.to_string())),
+        };
+
+        // Always release the listener, even when the event loop has already
+        // stopped and can no longer acknowledge the shutdown message.
+        let _ = self.shutdown.send(true);
+        result
     }
 
     /// Retrieves a list of peers with their IDs.
@@ -270,6 +399,73 @@ impl Mailbox {
         }
     }
 
+    async fn change_config(&self, change: ConfChange) -> Result<RaftResponse> {
+        let mut sender = self.sender.clone();
+        let (chan, rx) = oneshot::channel();
+        sender
+            .send(Message::ConfigChange { change, chan })
+            .await
+            .map_err(|e| Error::SendError(e.to_string()))?;
+        match timeout(self.grpc_timeout, rx).await {
+            Ok(Ok(RaftResponse::Error(e))) => Err(Error::from(e)),
+            Ok(Ok(RaftResponse::WrongLeader { .. })) => Err(Error::NotLeader),
+            Ok(Ok(response)) => Ok(response),
+            Ok(Err(e)) => Err(Error::RecvError(e.to_string())),
+            Err(e) => Err(Error::RecvError(e.to_string())),
+        }
+    }
+
+    /// Promotes an existing learner to a voting member. This must be invoked
+    /// on the current leader after the learner has caught up.
+    pub async fn promote_learner(&self, node_id: u64, node_addr: String) -> Result<()> {
+        let mut change = ConfChange::default();
+        change.set_node_id(node_id);
+        change.set_change_type(ConfChangeType::AddNode);
+        change.set_context(to_stdvec(&node_addr)?);
+        match self.change_config(change).await? {
+            RaftResponse::Ok | RaftResponse::JoinSuccess { .. } => Ok(()),
+            response => Err(Error::from(format!(
+                "unexpected promote learner response: {response:?}"
+            ))),
+        }
+    }
+
+    /// Removes a member through the current leader.
+    pub async fn remove_node(&self, node_id: u64) -> Result<()> {
+        let mut change = ConfChange::default();
+        change.set_node_id(node_id);
+        change.set_change_type(ConfChangeType::RemoveNode);
+        change.set_context(to_stdvec(&RemoveNodeType::Normal)?);
+        match self.change_config(change).await? {
+            RaftResponse::Ok => Ok(()),
+            response => Err(Error::from(format!(
+                "unexpected remove node response: {response:?}"
+            ))),
+        }
+    }
+
+    /// Requests a leadership transfer to a caught-up voter. The call confirms
+    /// that the request was accepted; callers should poll status to confirm the
+    /// new leader.
+    pub async fn transfer_leader(&self, node_id: u64) -> Result<()> {
+        let mut sender = self.sender.clone();
+        let (chan, rx) = oneshot::channel();
+        sender
+            .send(Message::TransferLeader { node_id, chan })
+            .await
+            .map_err(|e| Error::SendError(e.to_string()))?;
+        match timeout(self.grpc_timeout, rx).await {
+            Ok(Ok(RaftResponse::Ok)) => Ok(()),
+            Ok(Ok(RaftResponse::Error(e))) => Err(Error::from(e)),
+            Ok(Ok(RaftResponse::WrongLeader { .. })) => Err(Error::NotLeader),
+            Ok(Ok(response)) => Err(Error::from(format!(
+                "unexpected transfer leader response: {response:?}"
+            ))),
+            Ok(Err(e)) => Err(Error::RecvError(e.to_string())),
+            Err(e) => Err(Error::RecvError(e.to_string())),
+        }
+    }
+
     /// Retrieves the current status of the Raft node.
     /// Sends a `Message::Status` request and waits for a `RaftResponse::Status` reply, which contains the node's status.
     #[inline]
@@ -353,6 +549,7 @@ pub struct Raft<S: Store + 'static> {
     laddr: SocketAddr,
     logger: slog::Logger,
     cfg: Arc<Config>,
+    shutdown: watch::Sender<bool>,
 }
 
 impl<S: Store + Send + Sync + 'static> Raft<S> {
@@ -369,6 +566,7 @@ impl<S: Store + Send + Sync + 'static> Raft<S> {
             .next()
             .ok_or_else(|| Error::from("None"))?;
         let (tx, rx) = mpsc::channel(100_000);
+        let (shutdown, _) = watch::channel(false);
         let cfg = Arc::new(cfg);
         Ok(Self {
             store,
@@ -377,6 +575,7 @@ impl<S: Store + Send + Sync + 'static> Raft<S> {
             laddr,
             logger,
             cfg,
+            shutdown,
         })
     }
 
@@ -385,6 +584,7 @@ impl<S: Store + Send + Sync + 'static> Raft<S> {
         Mailbox::new(
             Arc::new(DashMap::default()),
             self.tx.clone(),
+            self.shutdown.clone(),
             self.cfg.grpc_timeout,
             self.cfg.grpc_concurrency_limit,
             self.cfg.grpc_message_size,
@@ -477,7 +677,7 @@ impl<S: Store + Send + Sync + 'static> Raft<S> {
         node.add_peer(&node_addr, node_id);
         let server = RaftServer::new(self.tx, self.laddr, self.cfg.clone());
         let server_handle = async {
-            if let Err(e) = server.run().await {
+            if let Err(e) = server.run(self.shutdown.subscribe()).await {
                 warn!("raft server run error: {:?}", e);
                 Err(e)
             } else {
@@ -520,6 +720,43 @@ impl<S: Store + Send + Sync + 'static> Raft<S> {
         leader_id: Option<u64>,
         leader_addr: String,
     ) -> Result<()> {
+        self.join_with_role(
+            node_id,
+            node_addr,
+            leader_id,
+            leader_addr,
+            ConfChangeType::AddNode,
+        )
+        .await
+    }
+
+    /// Joins an existing cluster as a non-voting learner. The learner must be
+    /// explicitly promoted by the leader after its replicated state catches up.
+    pub async fn join_as_learner(
+        self,
+        node_id: u64,
+        node_addr: String,
+        leader_id: Option<u64>,
+        leader_addr: String,
+    ) -> Result<()> {
+        self.join_with_role(
+            node_id,
+            node_addr,
+            leader_id,
+            leader_addr,
+            ConfChangeType::AddLearnerNode,
+        )
+        .await
+    }
+
+    async fn join_with_role(
+        self,
+        node_id: u64,
+        node_addr: String,
+        leader_id: Option<u64>,
+        leader_addr: String,
+        join_change_type: ConfChangeType,
+    ) -> Result<()> {
         // 1. try to discover the leader and obtain an id from it, if leader_id is None.
         info!("attempting to join peer cluster at {}", leader_addr);
         let (leader_id, leader_addr): (u64, String) = if let Some(leader_id) = leader_id {
@@ -531,6 +768,7 @@ impl<S: Store + Send + Sync + 'static> Raft<S> {
         };
 
         // 2. run server and node to prepare for joining
+        let join_connect_retry_timeout = self.cfg.join_connect_retry_timeout;
         let mut node = RaftNode::new_follower(
             self.rx,
             self.tx.clone(),
@@ -540,10 +778,12 @@ impl<S: Store + Send + Sync + 'static> Raft<S> {
             self.cfg.clone(),
         )?;
         let peer = node.add_peer(&leader_addr, leader_id);
-        let mut client = peer.client().await?;
+        let mut client =
+            connect_to_join_leader(&peer, node_id, &leader_addr, join_connect_retry_timeout)
+                .await?;
         let server = RaftServer::new(self.tx, self.laddr, self.cfg.clone());
         let server_handle = async {
-            if let Err(e) = server.run().await {
+            if let Err(e) = server.run(self.shutdown.subscribe()).await {
                 warn!("raft server run error: {:?}", e);
                 Err(e)
             } else {
@@ -576,7 +816,7 @@ impl<S: Store + Send + Sync + 'static> Raft<S> {
             // TODO: handle wrong leader
             let mut change = ConfChange::default();
             change.set_node_id(node_id);
-            change.set_change_type(ConfChangeType::AddNode);
+            change.set_change_type(join_change_type);
             change.set_context(to_stdvec(&node_addr)?);
             // change.set_context(serialize(&node_addr)?);
 
@@ -615,5 +855,82 @@ impl<S: Store + Send + Sync + 'static> Raft<S> {
         let _ = tokio::try_join!(server_handle, node_handle)?;
         info!("leaving follower node");
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Clone, Default)]
+    struct TestStore;
+
+    #[async_trait]
+    impl Store for TestStore {
+        async fn apply(&mut self, message: &[u8]) -> Result<Vec<u8>> {
+            Ok(message.to_vec())
+        }
+
+        async fn query(&self, query: &[u8]) -> Result<Vec<u8>> {
+            Ok(query.to_vec())
+        }
+
+        async fn snapshot(&self) -> Result<Vec<u8>> {
+            Ok(Vec::new())
+        }
+
+        async fn restore(&mut self, _snapshot: &[u8]) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn graceful_shutdown_stops_the_raft_runtime() {
+        let logger = slog::Logger::root(slog::Discard, slog::o!());
+        let raft = Raft::new("127.0.0.1:0", TestStore, logger, Config::default()).unwrap();
+        let mailbox = raft.mailbox();
+        let runtime = tokio::spawn(raft.lead(1, "127.0.0.1:0".to_string()));
+
+        let mut started = false;
+        for _ in 0..50 {
+            if mailbox.status().await.is_ok() {
+                started = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(started, "raft runtime did not start");
+
+        mailbox.shutdown().await.unwrap();
+        let result = timeout(Duration::from_secs(5), runtime)
+            .await
+            .expect("raft runtime did not stop")
+            .expect("raft runtime task panicked");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn join_connect_retry_delay_is_bounded() {
+        let remaining = Duration::from_millis(120);
+        let delay = join_connect_retry_delay(2, 10, Duration::from_secs(5), remaining);
+        assert_eq!(delay, remaining);
+    }
+
+    #[test]
+    fn join_connect_retry_delay_uses_node_jitter() {
+        let remaining = Duration::from_secs(10);
+        let node_one = join_connect_retry_delay(1, 1, JOIN_CONNECT_RETRY_INITIAL_DELAY, remaining);
+        let node_two = join_connect_retry_delay(2, 1, JOIN_CONNECT_RETRY_INITIAL_DELAY, remaining);
+        assert_ne!(node_one, node_two);
+        assert!(node_one <= JOIN_CONNECT_RETRY_MAX_DELAY);
+        assert!(node_two <= JOIN_CONNECT_RETRY_MAX_DELAY);
+    }
+
+    #[test]
+    fn join_connect_retry_timeout_defaults_to_twenty_seconds() {
+        assert_eq!(
+            Config::default().join_connect_retry_timeout,
+            Duration::from_secs(20)
+        );
     }
 }

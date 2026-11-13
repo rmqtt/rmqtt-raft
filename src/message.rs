@@ -60,12 +60,21 @@ pub enum Message {
     RequestId { chan: Sender<RaftResponse> },
     /// Report that a node is unreachable.
     ReportUnreachable { node_id: u64 },
+    /// Report the transport result of a snapshot to the Raft progress tracker.
+    ReportSnapshot { node_id: u64, success: bool },
     /// A Raft message to be processed.
     Raft(Box<RaftMessage>),
     /// A request for the status of the system.
     Status { chan: Sender<RaftResponse> },
+    /// Requests the current leader to transfer leadership to another voter.
+    TransferLeader {
+        node_id: u64,
+        chan: Sender<RaftResponse>,
+    },
     /// Snapshot
     Snapshot { snapshot: Snapshot },
+    /// Gracefully stops the local Raft event loop.
+    Shutdown { chan: Sender<RaftResponse> },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -74,11 +83,31 @@ pub struct PeerState {
     pub available: bool,
 }
 
+/// Replication progress as observed by the leader for one Raft peer.
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct PeerReplicationState {
+    pub matched: u64,
+    pub next_index: u64,
+    pub committed_index: u64,
+    pub pending_snapshot: u64,
+    pub recent_active: bool,
+    pub paused: bool,
+    pub state: String,
+}
+
 /// Struct representing the status of the system.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Status {
     pub id: u64,
     pub leader_id: u64,
+    pub applied_index: u64,
+    pub committed_index: u64,
+    pub last_index: u64,
+    pub snapshot_restored: bool,
+    pub snapshot_index: u64,
+    pub voters: Vec<u64>,
+    pub learners: Vec<u64>,
+    pub peer_replication: HashMap<u64, PeerReplicationState>,
     pub uncommitteds: usize,
     pub merger_proposals: usize,
     pub sending_raft_messages: isize,
@@ -95,12 +124,41 @@ pub struct Status {
 }
 
 impl Status {
+    /// Returns true once the local state machine has restored its initial
+    /// snapshot and applied every log entry committed on this node.
+    #[inline]
+    pub fn local_caught_up(&self) -> bool {
+        self.snapshot_restored && self.applied_index >= self.committed_index
+    }
+
+    #[inline]
+    pub fn is_voter(&self, id: u64) -> bool {
+        self.voters.contains(&id)
+    }
+
+    #[inline]
+    pub fn is_learner(&self, id: u64) -> bool {
+        self.learners.contains(&id)
+    }
+
+    /// Returns true when the leader has observed a recently active peer whose
+    /// replicated log has reached the leader's current committed index.
+    #[inline]
+    pub fn peer_caught_up(&self, id: u64) -> bool {
+        self.is_leader()
+            && self.peer_replication.get(&id).is_some_and(|progress| {
+                progress.recent_active
+                    && progress.pending_snapshot == 0
+                    && progress.matched >= self.committed_index
+            })
+    }
+
     #[inline]
     pub fn available(&self) -> bool {
         if matches!(self.role, StateRole::Leader) {
             //Check if the number of available nodes is greater than or equal to half of the total nodes.
             let (all_count, available_count) = self.get_count();
-            let available = available_count >= ((all_count / 2) + (all_count % 2));
+            let available = all_count > 0 && available_count >= ((all_count / 2) + 1);
             log::debug!(
                 "is Leader, all_count: {}, available_count: {} {}",
                 all_count,
@@ -121,7 +179,7 @@ impl Status {
             //If there is no Leader, it's still necessary to check whether the number of all other
             // available nodes is greater than or equal to half.
             let (all_count, available_count) = self.get_count();
-            let available = available_count >= ((all_count / 2) + (all_count % 2));
+            let available = all_count > 0 && available_count >= ((all_count / 2) + 1);
             log::debug!(
                 "no Leader, all_count: {}, available_count: {} {}",
                 all_count,
@@ -135,15 +193,18 @@ impl Status {
     #[inline]
     fn get_count(&self) -> (usize, usize) {
         let available_count = self
-            .peers
+            .voters
             .iter()
-            .filter(|(_, p)| if let Some(p) = p { p.available } else { false })
+            .filter(|&&id| {
+                id == self.id
+                    || self
+                        .peers
+                        .get(&id)
+                        .and_then(|peer| peer.as_ref())
+                        .is_some_and(|peer| peer.available)
+            })
             .count();
-        if self.peers.contains_key(&self.id) {
-            (self.peers.len() - 1, available_count - 1)
-        } else {
-            (self.peers.len(), available_count)
-        }
+        (self.voters.len(), available_count)
     }
 
     /// Checks if the node has started.
@@ -185,6 +246,96 @@ impl Status {
             StateRole::PreCandidate => 4u8,
         }
         .serialize(s)
+    }
+}
+
+#[cfg(test)]
+mod status_tests {
+    use super::*;
+
+    fn leader_status() -> Status {
+        Status {
+            id: 1,
+            leader_id: 1,
+            applied_index: 10,
+            committed_index: 10,
+            last_index: 10,
+            snapshot_restored: true,
+            snapshot_index: 8,
+            voters: vec![1, 2, 3],
+            learners: vec![4],
+            peer_replication: HashMap::new(),
+            uncommitteds: 0,
+            merger_proposals: 0,
+            sending_raft_messages: 0,
+            timeout_max: 0,
+            timeout_recent_count: 0,
+            propose_count: 0,
+            propose_rate: 0.0,
+            peers: HashMap::from([
+                (
+                    2,
+                    Some(PeerState {
+                        addr: ByteString::from("node-2"),
+                        available: true,
+                    }),
+                ),
+                (
+                    3,
+                    Some(PeerState {
+                        addr: ByteString::from("node-3"),
+                        available: false,
+                    }),
+                ),
+                (
+                    4,
+                    Some(PeerState {
+                        addr: ByteString::from("node-4"),
+                        available: true,
+                    }),
+                ),
+            ]),
+            role: StateRole::Leader,
+        }
+    }
+
+    #[test]
+    fn availability_uses_voter_quorum_and_ignores_learners() {
+        let mut status = leader_status();
+        assert!(status.available());
+
+        status
+            .peers
+            .get_mut(&2)
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .available = false;
+        assert!(!status.available());
+    }
+
+    #[test]
+    fn caught_up_requires_restored_snapshot_and_finished_snapshot_transfer() {
+        let mut status = leader_status();
+        assert!(status.local_caught_up());
+
+        status.peer_replication.insert(
+            4,
+            PeerReplicationState {
+                matched: 10,
+                pending_snapshot: 8,
+                recent_active: true,
+                ..Default::default()
+            },
+        );
+        assert!(!status.peer_caught_up(4));
+
+        status
+            .peer_replication
+            .get_mut(&4)
+            .unwrap()
+            .pending_snapshot = 0;
+        assert!(status.peer_caught_up(4));
     }
 }
 

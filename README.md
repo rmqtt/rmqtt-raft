@@ -10,6 +10,14 @@ most featureful raft, but instead a convenient interface to get started quickly,
 
 The interface is strongly inspired by the one used by [canonical/raft](https://github.com/canonical/raft).
 
+## Dynamic-peers fork
+
+The `0.7.2-dynamic-peers` branch ports the maintenance APIs from
+`0.6.0-dynamic-peers` onto the official `0.7.2` tag. The original maintenance
+branch and the official baseline are retained. See
+[the porting notes](docs/dynamic-peers-0.7.2.md) for provenance, API boundaries,
+compatibility and regression commands.
+
 ## Usage
 
 Add this to your `Cargo.toml`:

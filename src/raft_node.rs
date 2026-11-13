@@ -15,14 +15,15 @@ use postcard::{from_bytes, to_stdvec};
 use prost::Message as _;
 use scopeguard::guard;
 use tikv_raft::eraftpb::{ConfChange, ConfChangeType, Entry, EntryType, Message as RaftMessage};
-use tikv_raft::{prelude::*, raw_node::RawNode, Config as RaftConfig};
+use tikv_raft::{prelude::*, raw_node::RawNode, Config as RaftConfig, StateRole};
 use tokio::sync::RwLock;
 use tokio::time::timeout;
 use tonic::Request;
 
 use crate::error::{Error, Result};
 use crate::message::{
-    Merger, Message, PeerState, Proposals, RaftResponse, RemoveNodeType, ReplyChan, Status,
+    Merger, Message, PeerReplicationState, PeerState, Proposals, RaftResponse, RemoveNodeType,
+    ReplyChan, Status,
 };
 use crate::raft::Store;
 use crate::raft_service::raft_service_client::RaftServiceClient;
@@ -32,6 +33,11 @@ use crate::timeout_recorder::TimeoutRecorder;
 use crate::Config;
 
 pub type RaftGrpcClient = RaftServiceClient<tonic::transport::channel::Channel>;
+
+#[inline]
+fn heartbeat_commit_exceeds_last_index(message: &RaftMessage, last_index: u64) -> bool {
+    message.get_msg_type() == MessageType::MsgHeartbeat && message.get_commit() > last_index
+}
 
 struct MessageSender {
     message: RaftMessage,
@@ -57,9 +63,25 @@ impl MessageSender {
 
     async fn _send(mut self) {
         let mut current_retry = 0usize;
+        let is_snapshot = self.message.get_msg_type() == MessageType::MsgSnapshot;
         loop {
             match self.client.send_message(&self.message).await {
                 Ok(_) => {
+                    if is_snapshot {
+                        if let Err(e) = self
+                            .chan
+                            .send(Message::ReportSnapshot {
+                                node_id: self.client_id,
+                                success: true,
+                            })
+                            .await
+                        {
+                            warn!(
+                                "error reporting successful snapshot transport to node {}: {:?}",
+                                self.client_id, e
+                            );
+                        }
+                    }
                     return;
                 }
                 Err(e) => {
@@ -82,6 +104,21 @@ impl MessageSender {
                                 "error ReportUnreachable after {}/{} retries: {:?}, target addr: {:?}",
                                 current_retry, self.max_retries, e, self.client.addr
                             );
+                        }
+                        if is_snapshot {
+                            if let Err(e) = self
+                                .chan
+                                .send(Message::ReportSnapshot {
+                                    node_id: self.client_id,
+                                    success: false,
+                                })
+                                .await
+                            {
+                                warn!(
+                                    "error reporting failed snapshot transport to node {}: {:?}",
+                                    self.client_id, e
+                                );
+                            }
                         }
                         return;
                     }
@@ -432,6 +469,9 @@ pub struct RaftNode<S: Store> {
     cfg: Arc<Config>,
     timeout_recorder: TimeoutRecorder,
     propose_counter: Counter,
+    snapshot_restored: bool,
+    snapshot_index: u64,
+    snapshot_after_apply: bool,
 }
 
 impl<S: Store + 'static> RaftNode<S> {
@@ -498,6 +538,9 @@ impl<S: Store + 'static> RaftNode<S> {
             cfg,
             timeout_recorder: TimeoutRecorder::new(Duration::from_secs(15), 5),
             propose_counter: Counter::new(Duration::from_secs(3)),
+            snapshot_restored: true,
+            snapshot_index: 1,
+            snapshot_after_apply: false,
         };
         Ok(node)
     }
@@ -551,6 +594,9 @@ impl<S: Store + 'static> RaftNode<S> {
             cfg,
             timeout_recorder: TimeoutRecorder::new(Duration::from_secs(10), 5),
             propose_counter: Counter::new(Duration::from_secs(3)),
+            snapshot_restored: false,
+            snapshot_index: 0,
+            snapshot_after_apply: false,
         })
     }
 
@@ -680,6 +726,40 @@ impl<S: Store + 'static> RaftNode<S> {
     async fn status(&self, merger_proposals: usize) -> Status {
         let role = self.raft.state;
         let leader_id = self.raft.leader_id;
+        let applied_index = self.raft.raft_log.applied;
+        let committed_index = self.raft.raft_log.committed;
+        let last_index = self.raft.raft_log.last_index();
+        let conf_state = self.raft.prs().conf().to_conf_state();
+        let mut voters = conf_state.voters;
+        voters.extend(conf_state.voters_outgoing);
+        voters.sort_unstable();
+        voters.dedup();
+        let mut learners = conf_state.learners;
+        learners.extend(conf_state.learners_next);
+        learners.sort_unstable();
+        learners.dedup();
+        let peer_replication = if matches!(role, StateRole::Leader) {
+            self.raft
+                .prs()
+                .iter()
+                .map(|(id, progress)| {
+                    (
+                        *id,
+                        PeerReplicationState {
+                            matched: progress.matched,
+                            next_index: progress.next_idx,
+                            committed_index: progress.committed_index,
+                            pending_snapshot: progress.pending_snapshot,
+                            recent_active: progress.recent_active,
+                            paused: progress.paused,
+                            state: format!("{:?}", progress.state),
+                        },
+                    )
+                })
+                .collect()
+        } else {
+            HashMap::new()
+        };
         let sending_raft_messages = self.sending_raft_messages.load(Ordering::SeqCst);
         let timeout_max = self.timeout_recorder.max() as isize;
         let timeout_recent_count = self.timeout_recorder.recent_get() as isize;
@@ -688,6 +768,14 @@ impl<S: Store + 'static> RaftNode<S> {
         Status {
             id: self.inner.raft.id,
             leader_id,
+            applied_index,
+            committed_index,
+            last_index,
+            snapshot_restored: self.snapshot_restored,
+            snapshot_index: self.snapshot_index,
+            voters,
+            learners,
+            peer_replication,
             uncommitteds: self.uncommitteds.len(),
             merger_proposals,
             sending_raft_messages,
@@ -819,6 +907,7 @@ impl<S: Store + 'static> RaftNode<S> {
         let mut heartbeat = self.cfg.heartbeat;
         let mut now = Instant::now();
         let mut snapshot_received = self.is_leader();
+        let mut out_of_range_heartbeat_logged = false;
         let mut merger = Merger::new(
             self.cfg.proposal_batch_size,
             self.cfg.proposal_batch_timeout,
@@ -890,16 +979,51 @@ impl<S: Store + 'static> RaftNode<S> {
                             self.has_leader(),
                             m
                         );
-                    } else {
-                        if let Err(e) = self.step(*m) {
-                            warn!(
-                                "step error, {:?}, msg_type: {:?}, snapshot_received: {}",
-                                e, msg_type, snapshot_received
-                            );
+                    }
+
+                    // RaftLog::commit_to returns immediately when the heartbeat does not
+                    // advance commit, so preserve that steady-state fast path.
+                    let heartbeat_may_advance_commit = msg_type == MessageType::MsgHeartbeat
+                        && m.get_commit() > self.raft.raft_log.committed;
+                    if heartbeat_may_advance_commit {
+                        let last_index = self.raft.raft_log.last_index();
+                        if heartbeat_commit_exceeds_last_index(m.as_ref(), last_index) {
+                            if !out_of_range_heartbeat_logged {
+                                warn!(
+                                    "ignoring heartbeat whose commit exceeds the local log: \
+                                     from={}, term={}, commit={}, last_index={}, snapshot_received={}",
+                                    m.from,
+                                    m.get_term(),
+                                    m.get_commit(),
+                                    last_index,
+                                    snapshot_received
+                                );
+                                out_of_range_heartbeat_logged = true;
+                            } else {
+                                debug!(
+                                    "ignoring heartbeat whose commit exceeds the local log: \
+                                     from={}, term={}, commit={}, last_index={}, snapshot_received={}",
+                                    m.from,
+                                    m.get_term(),
+                                    m.get_commit(),
+                                    last_index,
+                                    snapshot_received
+                                );
+                            }
+                            continue;
                         }
-                        if msg_type == MessageType::MsgSnapshot {
-                            snapshot_received = true;
-                        }
+                    }
+
+                    // Safe heartbeats must still be processed while a joining follower waits
+                    // for its initial snapshot so the leader can continue replication.
+                    if let Err(e) = self.step(*m) {
+                        warn!(
+                            "step error, {:?}, msg_type: {:?}, snapshot_received: {}",
+                            e, msg_type, snapshot_received
+                        );
+                    }
+                    if msg_type == MessageType::MsgSnapshot {
+                        snapshot_received = true;
                     }
                 }
                 Ok(Some(Message::Propose { proposal, chan })) => {
@@ -944,8 +1068,27 @@ impl<S: Store + 'static> RaftNode<S> {
                 Ok(Some(Message::Status { chan })) => {
                     self.send_status(&merger, chan).await;
                 }
+                Ok(Some(Message::TransferLeader { node_id, chan })) => {
+                    if !self.is_leader() {
+                        self.send_wrong_leader("TransferLeader", chan);
+                    } else if !self.raft.prs().conf().voters().contains(node_id) {
+                        let _ = chan.send(RaftResponse::Error(format!(
+                            "target node {node_id} is not a voter"
+                        )));
+                    } else if node_id == self.id() {
+                        let _ = chan.send(RaftResponse::Ok);
+                    } else {
+                        self.transfer_leader(node_id);
+                        let _ = chan.send(RaftResponse::Ok);
+                    }
+                }
                 Ok(Some(Message::Snapshot { snapshot })) => {
                     self.set_snapshot(snapshot);
+                }
+                Ok(Some(Message::Shutdown { chan })) => {
+                    info!("graceful raft shutdown requested for node {}", self.id());
+                    self.should_quit = true;
+                    let _ = chan.send(RaftResponse::Ok);
                 }
                 Ok(Some(Message::ReportUnreachable { node_id })) => {
                     debug!(
@@ -954,6 +1097,15 @@ impl<S: Store + 'static> RaftNode<S> {
                         self.sending_raft_messages.load(Ordering::SeqCst)
                     );
                     self.report_unreachable(node_id);
+                }
+                Ok(Some(Message::ReportSnapshot { node_id, success })) => {
+                    let status = if success {
+                        SnapshotStatus::Finish
+                    } else {
+                        SnapshotStatus::Failure
+                    };
+                    info!("report snapshot transport result: node_id={node_id}, status={status:?}");
+                    self.report_snapshot(node_id, status);
                 }
                 Ok(None) => {
                     error!("Recv None");
@@ -1025,6 +1177,8 @@ impl<S: Store + 'static> RaftNode<S> {
             self.store.restore(snapshot.get_data()).await?;
             let store = self.mut_store();
             store.apply_snapshot(snapshot.clone())?;
+            self.snapshot_restored = true;
+            self.snapshot_index = snapshot.get_metadata().index;
         }
 
         self.handle_committed_entries(ready.take_committed_entries())
@@ -1058,6 +1212,12 @@ impl<S: Store + 'static> RaftNode<S> {
         self.handle_committed_entries(light_rd.take_committed_entries())
             .await?;
         self.advance_apply();
+
+        if self.snapshot_after_apply {
+            self.snapshot_after_apply = false;
+            let snapshot = self.generate_snapshot_sync().await?;
+            self.set_snapshot(snapshot);
+        }
 
         Ok(())
     }
@@ -1132,7 +1292,7 @@ impl<S: Store + 'static> RaftNode<S> {
         let change_type = change.get_change_type();
 
         match change_type {
-            ConfChangeType::AddNode => {
+            ConfChangeType::AddNode | ConfChangeType::AddLearnerNode => {
                 let addr: String = from_bytes(change.get_context())?;
                 info!("adding {} ({}) to peers", addr, id);
                 self.add_peer(&addr, id);
@@ -1154,19 +1314,22 @@ impl<S: Store + 'static> RaftNode<S> {
                     self.peers.remove(&id);
                 }
             }
-            _ => {
-                warn!("unimplemented! change_type: {:?}", change_type);
-            }
         }
 
         if let Ok(cs) = self.apply_conf_change(&change) {
             info!("conf state: {cs:?}, id: {id}, this id: {}", self.id());
-            if matches!(change_type, ConfChangeType::AddNode) {
+            if matches!(
+                change_type,
+                ConfChangeType::AddNode | ConfChangeType::AddLearnerNode
+            ) {
                 let store = self.mut_store();
                 store.set_conf_state(&cs)?;
-                if id != self.id() {
-                    let snap = self.generate_snapshot_sync().await?;
-                    self.set_snapshot(snap);
+                if self.is_leader() && id != self.id() {
+                    // Generate the snapshot after advance_apply(), otherwise the
+                    // snapshot index can precede the configuration entry that
+                    // introduced this peer. Only the current leader needs the
+                    // eager snapshot used to initialize the new learner.
+                    self.snapshot_after_apply = true;
                 }
             } else {
                 let store = self.mut_store();
@@ -1176,15 +1339,13 @@ impl<S: Store + 'static> RaftNode<S> {
 
         if let Some(sender) = self.uncommitteds.remove(&seq) {
             let response = match change_type {
-                ConfChangeType::AddNode => RaftResponse::JoinSuccess {
-                    assigned_id: id,
-                    peer_addrs: self.peer_addrs(),
-                },
-                ConfChangeType::RemoveNode => RaftResponse::Ok,
-                _ => {
-                    warn!("unimplemented! change_type: {:?}", change_type);
-                    RaftResponse::Error("unimplemented".into())
+                ConfChangeType::AddNode | ConfChangeType::AddLearnerNode => {
+                    RaftResponse::JoinSuccess {
+                        assigned_id: id,
+                        peer_addrs: self.peer_addrs(),
+                    }
                 }
+                ConfChangeType::RemoveNode => RaftResponse::Ok,
             };
             if let ReplyChan::One((sender, _)) = sender {
                 if sender.send(response).is_err() {
@@ -1349,8 +1510,9 @@ impl<S: Store + 'static> RaftNode<S> {
     }
 
     fn set_snapshot(&mut self, snap: Snapshot) {
-        let store = self.mut_store();
         let last_applied = snap.get_metadata().index;
+        self.snapshot_index = last_applied;
+        let store = self.mut_store();
         store.set_snapshot(snap);
         if let Err(e) = store.compact(last_applied) {
             error!("compact error, {e}");
@@ -1370,5 +1532,98 @@ impl<S: Store> Deref for RaftNode<S> {
 impl<S: Store> DerefMut for RaftNode<S> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.inner
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn raft_message(msg_type: MessageType, commit: u64) -> RaftMessage {
+        let mut message = RaftMessage::default();
+        message.set_msg_type(msg_type);
+        message.set_commit(commit);
+        message
+    }
+
+    #[test]
+    fn rejects_heartbeat_commit_beyond_local_log() {
+        let message = raft_message(MessageType::MsgHeartbeat, 11);
+
+        assert!(heartbeat_commit_exceeds_last_index(&message, 10));
+    }
+
+    #[test]
+    fn accepts_heartbeat_commit_within_local_log() {
+        let behind = raft_message(MessageType::MsgHeartbeat, 9);
+        let equal = raft_message(MessageType::MsgHeartbeat, 10);
+
+        assert!(!heartbeat_commit_exceeds_last_index(&behind, 10));
+        assert!(!heartbeat_commit_exceeds_last_index(&equal, 10));
+    }
+
+    #[test]
+    fn does_not_filter_other_raft_messages() {
+        let append = raft_message(MessageType::MsgAppend, 11);
+        let snapshot = raft_message(MessageType::MsgSnapshot, 11);
+
+        assert!(!heartbeat_commit_exceeds_last_index(&append, 10));
+        assert!(!heartbeat_commit_exceeds_last_index(&snapshot, 10));
+    }
+
+    #[tokio::test]
+    async fn failed_snapshot_transport_reports_failure_and_releases_message_count() {
+        for message_type in [MessageType::MsgSnapshot, MessageType::MsgAppend] {
+            // Reserve the endpoint for the whole attempt but never accept its
+            // HTTP/2 handshake. This is a local, bounded transport failure,
+            // without racing another test for an unbound port.
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+            let peer = Peer::new(
+                addr.to_string(),
+                Duration::from_millis(100),
+                1,
+                1024,
+                1,
+                0,
+            );
+            let (chan, reports) = mpsc::channel(4);
+            let sending = Arc::new(AtomicIsize::new(0));
+            let sender = MessageSender {
+                message: raft_message(message_type, 0),
+                client: peer,
+                client_id: 42,
+                chan,
+                max_retries: 0,
+                timeout: Duration::from_millis(10),
+                sending_raft_messages: sending.clone(),
+            };
+
+            let reports = timeout(Duration::from_secs(3), async {
+                sender.send().await;
+                reports.collect::<Vec<_>>().await
+            })
+            .await
+            .expect("failed Raft transport did not finish within its deadline");
+
+            assert_eq!(sending.load(Ordering::SeqCst), 0);
+            assert!(matches!(
+                reports.first(),
+                Some(Message::ReportUnreachable { node_id: 42 })
+            ));
+            if message_type == MessageType::MsgSnapshot {
+                assert_eq!(reports.len(), 2);
+                assert!(matches!(
+                    reports.get(1),
+                    Some(Message::ReportSnapshot {
+                        node_id: 42,
+                        success: false,
+                    })
+                ));
+            } else {
+                assert_eq!(reports.len(), 1, "ordinary messages must not report snapshots");
+            }
+            drop(listener);
+        }
     }
 }
